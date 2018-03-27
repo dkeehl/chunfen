@@ -67,15 +67,9 @@ pub fn communicate<A, B, T, U>(a: &mut A, b: &mut B)
     b.tell(a);
 }
 
-pub struct TcpConnection {
-    stream: TcpStream,
-}
+pub struct TcpConnection(TcpStream);
 
 impl TcpConnection {
-    pub fn new(stream: TcpStream) -> Self {
-        TcpConnection { stream }
-    }
-
     pub fn read_u8(&mut self) -> Result<u8> {
         let mut buf = [0u8];
         self.read_to_buf(&mut buf)?;
@@ -100,7 +94,7 @@ impl TcpConnection {
         let mut buf = Vec::with_capacity(size);
         unsafe { buf.set_len(size); }
 
-        match self.stream.read(&mut buf) {
+        match self.0.read(&mut buf) {
             Ok(0) => Err(Error::Eof),
 
             Ok(n) => {
@@ -117,7 +111,7 @@ impl TcpConnection {
         let mut l = 0;
 
         while l < buf.len() {
-            match self.stream.read(&mut buf[l..]) {
+            match self.0.read(&mut buf[l..]) {
                 Ok(0) => return Err(Error::Eof),
                 Ok(n) => l += n,
                 Err(_) => return Err(Error::TcpIo),
@@ -130,7 +124,7 @@ impl TcpConnection {
         let mut l = 0;
 
         while l < buf.len() {
-            match self.stream.write(&buf[l..]) {
+            match self.0.write(&buf[l..]) {
                 Ok(n) => l += n,
                 Err(_) => return Err(Error::TcpIo),
             }
@@ -139,15 +133,15 @@ impl TcpConnection {
     }
 
     fn shutdown(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
+        let _ = self.0.shutdown(Shutdown::Both);
     }
 
     fn shutdown_read(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Read);
+        let _ = self.0.shutdown(Shutdown::Read);
     }
     
     fn shutdown_write(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Write);
+        let _ = self.0.shutdown(Shutdown::Write);
     }
 
 }

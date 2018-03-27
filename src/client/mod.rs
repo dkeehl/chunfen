@@ -23,10 +23,6 @@ enum TunnelMsg {
 enum SocksMsg {
 }
 
-struct TunConnection {
-    tcp: TcpConnection,
-}
-
 struct Tunnel {
     //connection with the server,
     //set to None when no connection established.
@@ -40,10 +36,10 @@ impl Tunnel {
         
         //crash if connection failed
         let stream = TcpStream::connect(server).unwrap();
-        let tcp = TcpConnection::new(stream.try_clone().unwrap());
+        let tcp = TcpConnection(stream.try_clone().unwrap());
 
         let (timer, receiver) = channel();
-        heart_beat_start(receiver, TcpConnection::new(stream));
+        heart_beat_start(receiver, TcpConnection(stream));
 
         Tunnel { tcp, timer, }
     }

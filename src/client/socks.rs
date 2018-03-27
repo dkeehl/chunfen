@@ -77,7 +77,7 @@ pub struct SocksConnection {
 
 impl SocksConnection {
     pub fn new(stream: TcpStream) -> Self {
-        let tcp = TcpConnection::new(stream);
+        let tcp = TcpConnection(stream);
         //let state = State::SelectMethod;
         SocksConnection { tcp }
     }
