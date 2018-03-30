@@ -1,9 +1,10 @@
-use std::net::{TcpStream, SocketAddrV4, Ipv4Addr};
+use std::net::{TcpStream, SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs};
 use std::vec::Vec;
 use std::convert::From;
+use std::str::from_utf8;
 
-use {Talker, TcpConnection, Result, Error, Addr};
-use client::{TunnelMsg, SocksMsg};
+use {Talker, TcpConnection, Result, Error, DomainName, Port, Id};
+use client::{ClientMsg, SocksMsg};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -54,6 +55,11 @@ enum Command {
     //UdpAssociate,
 }
 
+enum Addr {
+    Ipv4(SocketAddrV4),
+    DN(DomainName, Port),
+}
+
 enum Req {
     Methods(Ver, Vec<Method>),
     Cmd(Ver, Command, Addr),
@@ -61,6 +67,8 @@ enum Req {
 
 enum Resp {
     Select(Ver, Method),
+    Success(Ver, SocketAddr),
+    Fail,
 }
 
 //enum State {
@@ -71,18 +79,19 @@ enum Resp {
 //}
 
 pub struct SocksConnection {
+    id: Id,
     tcp: TcpConnection,
     //state: State,
 }
 
 impl SocksConnection {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(id: u32, stream: TcpStream) -> Self {
         let tcp = TcpConnection(stream);
         //let state = State::SelectMethod;
-        SocksConnection { tcp }
+        SocksConnection { id, tcp, }
     }
 
-    fn handshake(&mut self) -> Result<TunnelMsg> {
+    fn handshake(&mut self) -> Result<ClientMsg> {
         let req = self.get_methods()?;
 
         match req {
@@ -102,8 +111,12 @@ impl SocksConnection {
         let req = self.get_command()?;
 
         match req {
-            Req::Cmd(Ver::V5, Command::Connect, addr) =>
-                Ok(TunnelMsg::Connect(addr)),
+            Req::Cmd(Ver::V5, Command::Connect, Addr::Ipv4(addr)) =>
+                Ok(ClientMsg::Connect(self.id, addr)),
+
+            Req::Cmd(Ver::V5, Command::Connect, Addr::DN(dn, port)) =>
+                Ok(ClientMsg::ConnectDN(self.id, dn, port)),
+
             _ => Err(Error::SocksRequest),
         }
     }
@@ -120,6 +133,19 @@ impl SocksConnection {
         match resp {
             Resp::Select(ver, method) =>
                 self.tcp.write(&[u8::from(ver), u8::from(method)]),
+
+            Resp::Success(Ver::V5, SocketAddr::V4(addr)) => {
+                let [a, b, c, d] = addr.ip().octets();
+                let port = addr.port();
+                self.tcp.write(&[SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d])?;
+                self.tcp.write_u16(port)
+            },
+
+            Resp::Fail => {
+                self.tcp.write(&[SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0])
+            },
+
+            _ => unreachable!("unexpected server response"),
         }
     }
 
@@ -196,34 +222,64 @@ fn parse_method(x: u8) -> Method {
     }
 }
 
-impl Talker<TunnelMsg, SocksMsg> for SocksConnection {
-    fn tell<T, W>(&mut self, tunnel: &mut T) where T: Talker<W, TunnelMsg> {
+impl Talker<ClientMsg, SocksMsg> for SocksConnection {
+    fn tell<T, W>(&mut self, tunnel: &mut T) where T: Talker<W, ClientMsg> {
+        let id = self.id;
+
         if let Ok(m) = self.handshake() {
-            tunnel.told(m);
+            let _ = tunnel.told(ClientMsg::OpenPort(id));
+            let _ = tunnel.told(m);
             
             loop {
                 match self.tcp.read_at_most(1024) {
-                    Ok(buf) => tunnel.told(TunnelMsg::Write(buf)),
+                    Ok(buf) => {
+                        let _ = tunnel.told(ClientMsg::Data(id, buf));
+                    },
 
                     Err(Error::Eof) => {
-                        self.tcp.shutdown_read();
-                        tunnel.told(TunnelMsg::ShutdownWrite);
+                        let _ = self.tcp.shutdown_read();
+                        let _ = tunnel.told(ClientMsg::ShutdownWrite(id));
                         break
                     },
 
                     Err(_) => {
-                        tunnel.told(TunnelMsg::Close);
-                        self.tcp.shutdown();
+                        let _ = tunnel.told(ClientMsg::ClosePort(id));
+                        let _ = self.tcp.shutdown();
                         break
                     },
                 }
             }
         } else {
-            tunnel.told(TunnelMsg::Close);
-            self.tcp.shutdown();
+            let _ = tunnel.told(ClientMsg::ClosePort(id));
+            let _ = self.tcp.shutdown();
         }
     }
 
-    fn told(&mut self, msg: SocksMsg) {
+    fn told(&mut self, msg: SocksMsg) -> Result<()> {
+        match msg {
+            SocksMsg::ConnectOK(buf) => {
+                let addr = from_utf8(&buf[..]).unwrap_or("");
+                let mut addr = addr.to_socket_addrs().unwrap();
+                
+                if let Some(addr) = addr.nth(0) {
+                    self.response(Resp::Success(Ver::V5, addr))
+                } else {
+                    self.response(Resp::Fail)?;
+                    self.tcp.shutdown()
+                }
+            },
+
+            SocksMsg::Data(buf) => {
+                self.tcp.write(&buf[..])
+            },
+
+            SocksMsg::ShutdownWrite => {
+                self.tcp.shutdown_write()
+            },
+
+            SocksMsg::Close => {
+                self.tcp.shutdown()
+            },
+        }
     }
 }

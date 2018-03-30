@@ -2,7 +2,7 @@
 
 extern crate time;
 
-use std::net::{TcpStream, SocketAddrV4, Shutdown};
+use std::net::{TcpStream, Shutdown};
 use std::io::Read;
 use std::io::Write;
 
@@ -45,19 +45,16 @@ pub enum Error {
 
 type Result<T> = ::std::result::Result<T, Error>;
 
+type Id = u32;
+
 type DomainName = Vec<u8>;
 
 type Port = u16;
 
-pub enum Addr {
-    Ipv4(SocketAddrV4),
-    DN(DomainName, Port),
-}
-
 pub trait Talker<S, U> {
     fn tell<T, W>(&mut self, other: &mut T) where T: Talker<W, S>;
 
-    fn told(&mut self, word: U);
+    fn told(&mut self, word: U) -> Result<()>;
 }
 
 pub fn communicate<A, B, T, U>(a: &mut A, b: &mut B)
@@ -81,6 +78,13 @@ impl TcpConnection {
         self.read_to_buf(&mut buf)?;
         let x = unsafe { *(buf.as_ptr() as *const u16) };
         Ok(u16::from_be(x))
+    }
+
+    pub fn read_u32(&mut self) -> Result<u32> {
+        let mut buf = [0u8; 4];
+        self.read_to_buf(&mut buf)?;
+        let x = unsafe { *(buf.as_ptr() as *const u32) };
+        Ok(u32::from_be(x))
     }
 
     pub fn read_size(&mut self, size: usize) -> Result<Vec<u8>> {
@@ -132,16 +136,37 @@ impl TcpConnection {
         Ok(())
     }
 
-    fn shutdown(&mut self) {
-        let _ = self.0.shutdown(Shutdown::Both);
+    fn write_u8(&mut self, x: u8) -> Result<()> {
+        let buf = [x];
+        self.write(&buf)
     }
 
-    fn shutdown_read(&mut self) {
-        let _ = self.0.shutdown(Shutdown::Read);
+    fn write_u16(&mut self, x: u16) -> Result<()> {
+        let buf = [0u8; 2];
+        unsafe { *(buf.as_ptr() as *mut u16) = x.to_be(); }
+        self.write(&buf)
+    }
+
+    fn write_u32(&mut self, x: u32) -> Result<()> {
+        let buf = [0u8; 4];
+        unsafe { *(buf.as_ptr() as *mut u32) = x.to_be(); }
+        self.write(&buf)
+    }
+
+    fn shutdown_prim(&mut self, ty: Shutdown) -> Result<()> {
+        self.0.shutdown(ty).map_err(|_| Error::TcpIo)
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        self.shutdown_prim(Shutdown::Both)
+    }
+
+    fn shutdown_read(&mut self) -> Result<()> {
+        self.shutdown_prim(Shutdown::Read)
     }
     
-    fn shutdown_write(&mut self) {
-        let _ = self.0.shutdown(Shutdown::Write);
+    fn shutdown_write(&mut self) -> Result<()> {
+        self.shutdown_prim(Shutdown::Write)
     }
 
 }
