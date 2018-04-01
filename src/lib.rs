@@ -1,10 +1,18 @@
 #![feature(slice_patterns)]
 
+#[macro_use]
+extern crate log;
 extern crate time;
 
-use std::net::{TcpStream, Shutdown};
+use std::net::{TcpStream, Shutdown, SocketAddrV4};
 use std::io::Read;
 use std::io::Write;
+
+pub mod socks;
+
+//pub mod client;
+
+//pub mod server;
 
 pub mod protocol {
     pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
@@ -31,9 +39,12 @@ pub mod protocol {
 
 #[derive(Debug)]
 pub enum Error {
+    //socks errors
     SocksVersion,
     SocksState,
     SocksRequest,
+    SocksDisconnected,
+    HandshakeFailed,
 
     //when reading some data to a buffer,
     //if the buffer length is longer than the data read from, return this.
@@ -41,6 +52,9 @@ pub enum Error {
 
     TcpIo,
 
+    //client errors
+    LostConnectionToServer,
+    ServerClosedConnection,
 }
 
 type Result<T> = ::std::result::Result<T, Error>;
@@ -51,8 +65,30 @@ type DomainName = Vec<u8>;
 
 type Port = u16;
 
+#[derive(Debug)]
+enum ClientMsg {
+    HeartBeat,
+    OpenPort(Id),
+    Connect(Id, SocketAddrV4),
+    ConnectDN(Id, DomainName, Port),
+    Data(Id, Vec<u8>),
+    ShutdownWrite(Id),
+
+    ClosePort(Id),
+}
+
+enum ServerMsg {
+    HeartBeatRsp,
+    ConnectOK(Id, Vec<u8>),
+    Data(Id, Vec<u8>),
+    ShutdownWrite(Id),
+
+    ClosePort(Id),
+}
+
+/*
 pub trait Talker<S, U> {
-    fn tell<T, W>(&mut self, other: &mut T) where T: Talker<W, S>;
+    fn tell<T, W>(&mut self, other: &mut T) -> Result<()> where T: Talker<W, S>;
 
     fn told(&mut self, word: U) -> Result<()>;
 }
@@ -60,8 +96,13 @@ pub trait Talker<S, U> {
 pub fn communicate<A, B, T, U>(a: &mut A, b: &mut B)
     where A: Talker<T, U>, B: Talker<U, T>
 {
-    a.tell(b);
-    b.tell(a);
+    while a.tell(b).is_ok() && b.tell(a).is_ok() {}
+}
+
+*/
+
+trait WriteTcp<T> {
+    fn send(&mut self, msg: T) -> Result<()>;
 }
 
 pub struct TcpConnection(TcpStream);
@@ -171,4 +212,3 @@ impl TcpConnection {
 
 }
 
-pub mod client;

@@ -1,7 +1,8 @@
 [package]
 name = "chunfen"
 version = "0.1.0"
-authors = ["Administrator"]
+authors = ["Thomas Lin"]
 
 [dependencies]
 time = "*"
+log = "*"
