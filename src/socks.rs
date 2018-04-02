@@ -2,9 +2,8 @@ use std::net::{TcpStream, SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs,
                 Shutdown, TcpListener, };
 use std::vec::Vec;
 use std::convert::From;
-use std::io;
-use std::io::{copy, Read, Write};
-use std::marker::{Send, Sized};
+use std::io::copy;
+use std::marker::Send;
 use std::thread;
 use std::str::from_utf8;
 
@@ -78,19 +77,26 @@ enum Resp {
 
 pub struct SocksConnection;
 
-pub trait Connector: Read + Write + Send + TryClone + 'static {
+pub trait Connector {
     fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr>;
 
-    fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr>; 
+    fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr> {
+        if let Some(SocketAddr::V4(addr)) = try_parse_domain_name(dn, port) {
+            self.connect(addr)
+        } else {
+            None
+        }
+    }
+}
 
-    fn shutdown_read(&mut self) -> Result<()>;
-
-    fn shutdown_write(&mut self) -> Result<()>;
-
+pub trait CopyTcp {
+    fn copy_tcp(&mut self, stream: TcpStream) -> Result<()>;
 }
 
 impl SocksConnection {
-    pub fn new<T: Connector> (stream: TcpStream, connector: T) -> Result<()> {
+    pub fn new<T> (stream: TcpStream, connector: T) -> Result<()>
+        where T: Connector + CopyTcp + Send + 'static
+    {
         let mut tcp = TcpWrapper(stream.try_clone().unwrap());
         let mut connector = connector;
 
@@ -117,8 +123,7 @@ impl SocksConnection {
                 Some(SocketAddr::V4(addr)) => {
                     tcp.send(Resp::Success(SocketAddr::V4(addr)));
                     thread::spawn(move || {
-                        debug!("start copying data");
-                        copy_data(stream, connector);
+                        connector.copy_tcp(stream);
                     });
                     Ok(())
                 },
@@ -133,117 +138,35 @@ impl SocksConnection {
     }
 }
 
-fn copy_data<T: Connector>(stream: TcpStream, connector: T) -> Result<()> {
-    let mut client_reader = stream.try_clone().unwrap();
-    let mut outbound_writer = connector.try_clone().unwrap();
-    thread::spawn(move || {
-        copy(&mut client_reader, &mut outbound_writer);
-        client_reader.shutdown(Shutdown::Read);
-        outbound_writer.shutdown_write();
-    });
+type JustTcp = Option<TcpStream>;
 
-    let mut outbound_reader = connector;
-    let mut client_writer = stream;
-    copy(&mut outbound_reader, &mut client_writer);
-    client_writer.shutdown(Shutdown::Write);
-    outbound_reader.shutdown_read()
-}
+impl CopyTcp for JustTcp {
+    fn copy_tcp(&mut self, stream: TcpStream) -> Result<()> {
+        let outbound = self.take().expect("Not connected!");
+        let mut client_reader = stream.try_clone().unwrap();
+        let mut outbound_writer = outbound.try_clone().unwrap();
+        thread::spawn(move || {
+            copy(&mut client_reader, &mut outbound_writer);
+            client_reader.shutdown(Shutdown::Read).unwrap();
+            outbound_writer.shutdown(Shutdown::Write).unwrap();
+        });
 
-struct JustTcp {
-    tcp_stream: Option<TcpStream>,
-}
-
-impl JustTcp {
-    fn new() -> JustTcp {
-        JustTcp { tcp_stream: None }
-    }
-
-    fn stream(&mut self) -> &mut TcpStream {
-        if let Some(ref mut stream) = self.tcp_stream {
-            stream
-        } else {
-            panic!("Not connected!")
-        }
-    }
-}
-
-pub trait TryClone: Sized {
-    fn try_clone(&self) -> io::Result<Self>;
-}
-
-impl TryClone for JustTcp {
-    fn try_clone(&self) -> io::Result<JustTcp> {
-        if let Some(ref stream) = self.tcp_stream {
-            let stream = stream.try_clone()?;
-            Ok(JustTcp { tcp_stream: Some(stream) })
-        } else {
-            Ok(JustTcp { tcp_stream: None })
-        }
-    }
-}
-                   
-impl Read for JustTcp {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stream().read(buf)
-    }
-}
-
-impl Write for JustTcp {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stream().write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.stream().flush()
+        let mut outbound_reader = outbound;
+        let mut client_writer = stream;
+        copy(&mut outbound_reader, &mut client_writer);
+        client_writer.shutdown(Shutdown::Write).unwrap();
+        outbound_reader.shutdown(Shutdown::Read).unwrap();
+        Ok(())
     }
 }
 
 impl Connector for JustTcp {
     fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
         if let Ok(stream) = TcpStream::connect(addr) {
-            let result = Some(stream.local_addr().unwrap());
-            self.tcp_stream = Some(stream);
-            result
+            let s = self.get_or_insert(stream);
+            s.local_addr().ok()
         } else {
             None
-        }
-    }
-
-    fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr> {
-        if let Some(SocketAddr::V4(addr)) = try_parse_domain_name(dn, port) {
-            self.connect(addr)
-        } else {
-            None
-        }
-    }
-
-    fn shutdown_read(&mut self) -> Result<()> {
-        if let Some(ref stream) = self.tcp_stream {
-            stream.shutdown(Shutdown::Read).map_err(|_| Error::TcpIo)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn shutdown_write(&mut self) -> Result<()> {
-        if let Some(ref stream) = self.tcp_stream {
-            stream.shutdown(Shutdown::Write).map_err(|_| Error::TcpIo)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-pub struct Socks5;
-
-impl Socks5 {
-    pub fn new(listen_addr: &str) {
-        let listening = TcpListener::bind(listen_addr).unwrap();
-        for s in listening.incoming() {
-            if let Ok(stream) = s {
-                let mut connector = JustTcp::new();
-                SocksConnection::new(stream, connector);
-            }
         }
     }
 }
@@ -370,3 +293,16 @@ fn try_parse_domain_name(buf: DomainName, port: Port) -> Option<SocketAddr> {
     addr.nth(0)
 }
 
+pub struct Socks5;
+
+impl Socks5 {
+    pub fn bind(listen_addr: &str) {
+        let listening = TcpListener::bind(listen_addr).unwrap();
+        for s in listening.incoming() {
+            if let Ok(stream) = s {
+                let mut connector: JustTcp = None;
+                SocksConnection::new(stream, connector);
+            }
+        }
+    }
+}
