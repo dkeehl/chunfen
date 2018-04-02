@@ -8,7 +8,7 @@ use std::io::Write;
 use std::collections::HashMap;
 use time::{Timespec, get_time};
 
-use {DomainName, Port, Id, TcpConnection, Result, WriteTcp, Error, ServerMsg,
+use {DomainName, Port, Id, TcpWrapper, Result, WriteTcp, Error, ServerMsg,
     ClientMsg, };
 use socks::SocksConnection;
 use protocol::*;
@@ -65,7 +65,7 @@ impl Tunnel {
         // Crash if connection failed
         let stream = TcpStream::connect(server).unwrap();
 
-        let tcp = TcpConnection(stream.try_clone().unwrap());
+        let tcp = TcpWrapper(stream.try_clone().unwrap());
         let alive_time = get_time();
         let (sender, receiver) = channel();
 
@@ -75,7 +75,7 @@ impl Tunnel {
         // handles messages from the monitor and all the ports.
         let cloned_sender = sender.clone();
         thread::spawn(move || {
-            monitor(TcpConnection(stream), cloned_sender, alive_time);
+            monitor(TcpWrapper(stream), cloned_sender, alive_time);
         });
 
         thread::spawn(move || {
@@ -114,7 +114,7 @@ impl Timer {
     }
 }
 
-fn monitor(mut tcp: TcpConnection, handler: Sender<Msg>, alive_time: Timespec) {
+fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
     let mut alive_time = alive_time;
     let timer = Timer::new();
     loop {
@@ -166,7 +166,7 @@ fn monitor(mut tcp: TcpConnection, handler: Sender<Msg>, alive_time: Timespec) {
     }
 }
 
-fn handler(tcp: TcpConnection, receiver: Receiver<Msg>) {
+fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
     let mut ports = PortMap::new();
     loop {
         if let Ok(msg) = receiver.recv() {
@@ -210,7 +210,7 @@ fn handler(tcp: TcpConnection, receiver: Receiver<Msg>) {
     }
 }
 
-impl WriteTcp<ClientMsg> for TcpConnection {
+impl WriteTcp<ClientMsg> for TcpWrapper {
     fn send(&mut self, msg: ClientMsg) -> Result<()> {
         match msg {
             ClientMsg::HeartBeat => self.write_u8(cs::HEARTBEAT),

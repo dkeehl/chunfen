@@ -105,9 +105,9 @@ trait WriteTcp<T> {
     fn send(&mut self, msg: T) -> Result<()>;
 }
 
-pub struct TcpConnection(TcpStream);
+pub struct TcpWrapper(TcpStream);
 
-impl TcpConnection {
+impl TcpWrapper {
     pub fn read_u8(&mut self) -> Result<u8> {
         let mut buf = [0u8];
         self.read_to_buf(&mut buf)?;

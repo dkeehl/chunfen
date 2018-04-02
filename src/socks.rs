@@ -8,7 +8,7 @@ use std::marker::{Send, Sized};
 use std::thread;
 use std::str::from_utf8;
 
-use {TcpConnection, Result, Error, DomainName, Port, WriteTcp, };
+use {TcpWrapper, Result, Error, DomainName, Port, WriteTcp, };
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -91,7 +91,7 @@ pub trait Connector: Read + Write + Send + TryClone + 'static {
 
 impl SocksConnection {
     pub fn new<T: Connector> (stream: TcpStream, connector: T) -> Result<()> {
-        let mut tcp = TcpConnection(stream.try_clone().unwrap());
+        let mut tcp = TcpWrapper(stream.try_clone().unwrap());
         let mut connector = connector;
 
         debug!("handshaking");
@@ -248,7 +248,7 @@ impl Socks5 {
     }
 }
 
-fn handshake(tcp: &mut TcpConnection) -> Result<Req> {
+fn handshake(tcp: &mut TcpWrapper) -> Result<Req> {
     let req = get_methods(tcp)?;
 
     match req {
@@ -268,7 +268,7 @@ fn handshake(tcp: &mut TcpConnection) -> Result<Req> {
 }
 
 
-fn get_methods(tcp: &mut TcpConnection) -> Result<Req> {
+fn get_methods(tcp: &mut TcpWrapper) -> Result<Req> {
     let version = tcp.read_u8().and_then(|x| parse_version(x))?;
     let nmethods = tcp.read_u8()?;
     let methods = tcp.read_size(nmethods as usize)?;
@@ -276,7 +276,7 @@ fn get_methods(tcp: &mut TcpConnection) -> Result<Req> {
     Ok(Req::Methods(version, methods))
 }
 
-fn get_command(tcp: &mut TcpConnection) -> Result<Req> {
+fn get_command(tcp: &mut TcpWrapper) -> Result<Req> {
     let mut buf = [0u8; 4];
     tcp.read_to_buf(&mut buf)?;
 
@@ -290,7 +290,7 @@ fn get_command(tcp: &mut TcpConnection) -> Result<Req> {
     }
 }
 
-fn get_addr(tcp: &mut TcpConnection, atype: u8) -> Result<Addr> {
+fn get_addr(tcp: &mut TcpWrapper, atype: u8) -> Result<Addr> {
     match atype {
         ATYP_IP_V4 => {
             let mut buf = [0u8; 4];
@@ -338,7 +338,7 @@ fn parse_method(x: u8) -> Method {
     }
 }
 
-impl WriteTcp<Resp> for TcpConnection {
+impl WriteTcp<Resp> for TcpWrapper {
     fn send(&mut self, resp: Resp) -> Result<()> {
         match resp {
             Resp::Select(ver, method) => {
