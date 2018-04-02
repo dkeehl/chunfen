@@ -10,7 +10,7 @@ use std::io::Write;
 
 pub mod socks;
 
-//pub mod client;
+pub mod client;
 
 //pub mod server;
 

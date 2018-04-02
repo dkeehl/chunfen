@@ -1,16 +1,18 @@
-use std::net::{TcpStream, TcpListener, SocketAddrV4};
+use std::net::{TcpStream, TcpListener, SocketAddr, SocketAddrV4, Shutdown,
+               ToSocketAddrs};
 use std::thread;
-use std::sync::mpsc::{Sender, Receiver, channel, sync_channel, SyncSender,
-                    TryRecvError, };
-//use std::marker::Send;
+use std::sync::mpsc;
+use std::sync::mpsc::{Sender, Receiver,  SyncSender, TryRecvError, };
 use std::time::Duration;
-use std::io::Write;
+use std::io::{copy, Write};
 use std::collections::HashMap;
+use std::str::from_utf8;
+
 use time::{Timespec, get_time};
 
 use {DomainName, Port, Id, TcpWrapper, Result, WriteTcp, Error, ServerMsg,
     ClientMsg, };
-use socks::SocksConnection;
+use socks::{SocksConnection, Connector, CopyTcp};
 use protocol::*;
 
 #[derive(Debug)]
@@ -31,18 +33,18 @@ struct PortMap(HashMap<Id, SyncSender<SocksMsg>>);
 
 impl PortMap {
     fn new() -> PortMap {
-        PortMap { HashMap::new() }
+        PortMap(HashMap::new())
     }
 
-    fn insert(id: Id, sender: SyncSender<SocksMsg>) {
+    fn insert(&mut self, id: Id, sender: SyncSender<SocksMsg>) {
         self.0.insert(id, sender);
     }
 
-    fn remove(id: Id) {
+    fn remove(&mut self, id: Id) {
         self.0.remove(&id);
     }
 
-    fn send(id: Id, msg: SocksMsg) {
+    fn send(&mut self, id: Id, msg: SocksMsg) {
         self.0.get(&id).map(|v| v.send(msg));
     }
 }
@@ -54,9 +56,13 @@ struct Tunnel {
     count: u32,
 }
 
+// To implement the Write trait, need this wrapper for Sender
+#[derive(Clone)]
+struct MsgSender(Sender<Msg>, Id);
+
 struct TunnelPort {
     id: Id,
-    sender: Sender<Msg>,
+    sender: MsgSender,
     receiver: Receiver<SocksMsg>,
 }
 
@@ -67,7 +73,7 @@ impl Tunnel {
 
         let tcp = TcpWrapper(stream.try_clone().unwrap());
         let alive_time = get_time();
-        let (sender, receiver) = channel();
+        let (sender, receiver) = mpsc::channel();
 
         // A tunnel has two threads. One is `monitor`, which maintains the
         // the connection with the tunnel server, reads from the server and
@@ -89,10 +95,10 @@ impl Tunnel {
         let id = self.count;
         // Open a channel between the port and the tunnel. The sender is left,
         // while the receiver is put in the port.
-        let (sender, receiver) = sync_channel(10000);
-        self.sender.send(Msg::NewPort(id, sender)?;
+        let (sender, receiver) = mpsc::sync_channel(10000);
+        self.sender.send(Msg::NewPort(id, sender));
         self.count += 1;
-        Ok(TunnelPort { id, sender: self.sender.clone(), receiver, })
+        Ok(TunnelPort { id, sender: MsgSender(self.sender.clone(), id), receiver, })
     }
 }
 
@@ -100,7 +106,7 @@ pub struct Timer;
 
 impl Timer {
     pub fn new() -> Receiver<()> {
-        let (sender, receiver) = channel();
+        let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let t = Duration::from_millis(HEARTBEAT_INTERVAL_MS as u64);
             loop {
@@ -124,7 +130,7 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
                 if duration.num_milliseconds() > ALIVE_TIMEOUT_TIME_MS {
                     break;
                 } else {
-                    let _ = tcp.send(ClientMsg::HeartBeat);
+                    let _ = handler.send(Msg::Client(ClientMsg::HeartBeat));
                 }
             },
 
@@ -150,6 +156,7 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
                 handler.send(Msg::Server(ServerMsg::ShutdownWrite(id))).unwrap(),
 
             sc::CONNECT_OK => {
+                let len = tcp.read_u32().expect("failed to read tunnel");
                 let buf = tcp.read_size(len as usize).expect("failed to read tunnel");
                 handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf))).unwrap();
             },
@@ -167,6 +174,7 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
 }
 
 fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
+    let mut tcp = tcp;
     let mut ports = PortMap::new();
     loop {
         if let Ok(msg) = receiver.recv() {
@@ -184,26 +192,26 @@ fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
                             ports.send(id, SocksMsg::ConnectOK(buf)),
 
                         ServerMsg::Data(id, buf) =>
-                            ports.send(id, SocksMsg::Data(buf),
+                            ports.send(id, SocksMsg::Data(buf)),
 
                         ServerMsg::ShutdownWrite(id) =>
-                            ports.send(id, SocksMsg::ShutdownWrite,
+                            ports.send(id, SocksMsg::ShutdownWrite),
 
                         ServerMsg::ClosePort(id) =>
                             ports.send(id, SocksMsg::Close),
                     }
                 },
                 Msg::Client(c_msg) => {
-                    match c_msg => {
-                        ClientMsg::HeartBeat |
+                    match c_msg {
                         ClientMsg::OpenPort(_) => unreachable!(),
 
                         ClientMsg::ClosePort(id) => ports.remove(id),
                         
                         _ => {},
                     }
-                    tcp.send(c_msg)
+                    tcp.send(c_msg);
                 },
+            }
         } else {
             break
         }
@@ -257,6 +265,85 @@ impl WriteTcp<ClientMsg> for TcpWrapper {
     }
 }
 
+impl Connector for TunnelPort {
+    fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
+        self.sender.0.send(Msg::Client(ClientMsg::Connect(self.id, addr)));
+        if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
+            try_parse_domain_name(buf)
+        } else {
+            None
+        }
+    }
+
+    fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr> {
+        self.sender.0.send(Msg::Client(ClientMsg::ConnectDN(self.id, dn, port)));
+        if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
+            try_parse_domain_name(buf)
+        } else {
+            None
+        }
+    }
+}
+
+fn try_parse_domain_name(buf: Vec<u8>) -> Option<SocketAddr> {
+    let string = from_utf8(&buf[..]).unwrap_or("");
+    let mut addr = string.to_socket_addrs().unwrap();
+    addr.nth(0)
+}
+
+impl Write for MsgSender {
+    fn write(&mut self, buf: &[u8]) -> ::std::io::Result<usize> {
+        let size: usize = 1024;
+        let mut to: Vec<u8> = Vec::with_capacity(size);
+        let len = buf.len();
+        let res = if len > size {
+            to.write(&buf[..size])?
+        } else {
+            to.write(buf)?
+        };
+        self.0.send(Msg::Client(ClientMsg::Data(self.1, to)));
+        Ok(res)
+    }
+
+    fn flush(&mut self) -> ::std::io::Result<()> { Ok(()) }
+}
+
+impl CopyTcp for TunnelPort {
+    fn copy_tcp(&mut self, stream: TcpStream) -> Result<()> {
+        let mut stream_read = stream.try_clone().unwrap();
+        let mut tun_write = self.sender.clone();
+        thread::spawn(move || {
+            copy(&mut stream_read, &mut tun_write);
+            stream_read.shutdown(Shutdown::Read).unwrap();
+            tun_write.0.send(Msg::Client(ClientMsg::ShutdownWrite(tun_write.1)));
+        });
+
+        let mut stream_write = stream;
+        loop {
+            match self.receiver.recv() {
+                Ok(SocksMsg::ConnectOK(_)) => unreachable!(),
+
+                Ok(SocksMsg::Data(buf)) => {
+                    if stream_write.write(&buf[..]).is_err() {
+                        stream_write.shutdown(Shutdown::Both);
+                        return Err(Error::TcpIo)
+                    }
+                },
+
+                Ok(SocksMsg::ShutdownWrite) => {
+                    stream_write.shutdown(Shutdown::Write);
+                    return Ok(())
+                },
+
+                _ => {
+                    stream_write.shutdown(Shutdown::Both);
+                    return Err(Error::ServerClosedConnection)
+                },
+            }
+        }
+    }
+}
+
 pub struct Client; 
 
 impl Client {
@@ -265,7 +352,7 @@ impl Client {
         let mut tunnel = Tunnel::new(server_addr);
 
         for s in listening.incoming() {
-            if let (Ok(stream), Ok(connector)) = (s, tunnel.connect) { 
+            if let (Ok(stream), Ok(connector)) = (s, tunnel.connect()) { 
                 SocksConnection::new(stream, connector);
             }
         }

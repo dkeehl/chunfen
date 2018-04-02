@@ -77,6 +77,7 @@ enum Resp {
 
 pub struct SocksConnection;
 
+// Open a tcp connection to out bound
 pub trait Connector {
     fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr>;
 
@@ -89,6 +90,7 @@ pub trait Connector {
     }
 }
 
+// Exchange data with a TcpStream. Close the stream when copying finished.
 pub trait CopyTcp {
     fn copy_tcp(&mut self, stream: TcpStream) -> Result<()>;
 }
