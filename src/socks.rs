@@ -138,9 +138,9 @@ impl SocksConnection {
     }
 }
 
-type JustTcp = Option<TcpStream>;
+type SimpleConnector = Option<TcpStream>;
 
-impl CopyTcp for JustTcp {
+impl CopyTcp for SimpleConnector {
     fn copy_tcp(&mut self, stream: TcpStream) -> Result<()> {
         let outbound = self.take().expect("Not connected!");
         let mut client_reader = stream.try_clone().unwrap();
@@ -160,7 +160,7 @@ impl CopyTcp for JustTcp {
     }
 }
 
-impl Connector for JustTcp {
+impl Connector for SimpleConnector {
     fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
         if let Ok(stream) = TcpStream::connect(addr) {
             let s = self.get_or_insert(stream);
@@ -300,7 +300,7 @@ impl Socks5 {
         let listening = TcpListener::bind(listen_addr).unwrap();
         for s in listening.incoming() {
             if let Ok(stream) = s {
-                let mut connector: JustTcp = None;
+                let mut connector: SimpleConnector = None;
                 SocksConnection::new(stream, connector);
             }
         }
