@@ -1,18 +1,17 @@
 #![feature(slice_patterns)]
+#![allow(unused)]
 
 #[macro_use]
 extern crate log;
 extern crate time;
 
 use std::net::{TcpStream, Shutdown, SocketAddrV4};
-use std::io::Read;
-use std::io::Write;
+use std::io::{Read, Write};
 
 pub mod socks;
-
 pub mod client;
-
-//pub mod server;
+pub mod server;
+pub mod utils;
 
 pub mod protocol {
     pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
@@ -86,21 +85,6 @@ enum ServerMsg {
     ClosePort(Id),
 }
 
-/*
-pub trait Talker<S, U> {
-    fn tell<T, W>(&mut self, other: &mut T) -> Result<()> where T: Talker<W, S>;
-
-    fn told(&mut self, word: U) -> Result<()>;
-}
-
-pub fn communicate<A, B, T, U>(a: &mut A, b: &mut B)
-    where A: Talker<T, U>, B: Talker<U, T>
-{
-    while a.tell(b).is_ok() && b.tell(a).is_ok() {}
-}
-
-*/
-
 trait WriteTcp<T> {
     fn send(&mut self, msg: T) -> Result<()>;
 }
@@ -108,27 +92,27 @@ trait WriteTcp<T> {
 pub struct TcpWrapper(TcpStream);
 
 impl TcpWrapper {
-    pub fn read_u8(&mut self) -> Result<u8> {
+    fn read_u8(&mut self) -> Result<u8> {
         let mut buf = [0u8];
         self.read_to_buf(&mut buf)?;
         Ok(buf[0])
     }
 
-    pub fn read_u16(&mut self) -> Result<u16> {
+    fn read_u16(&mut self) -> Result<u16> {
         let mut buf = [0u8; 2];
         self.read_to_buf(&mut buf)?;
         let x = unsafe { *(buf.as_ptr() as *const u16) };
         Ok(u16::from_be(x))
     }
 
-    pub fn read_u32(&mut self) -> Result<u32> {
+    fn read_u32(&mut self) -> Result<u32> {
         let mut buf = [0u8; 4];
         self.read_to_buf(&mut buf)?;
         let x = unsafe { *(buf.as_ptr() as *const u32) };
         Ok(u32::from_be(x))
     }
 
-    pub fn read_size(&mut self, size: usize) -> Result<Vec<u8>> {
+    fn read_size(&mut self, size: usize) -> Result<Vec<u8>> {
         let mut buf = Vec::with_capacity(size);
         unsafe { buf.set_len(size); }
         self.read_to_buf(&mut buf)?;

@@ -3,16 +3,16 @@ use std::net::{TcpStream, TcpListener, SocketAddr, SocketAddrV4, Shutdown,
 use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::{Sender, Receiver,  SyncSender, TryRecvError, };
-use std::time::Duration;
 use std::io::{copy, Write};
 use std::collections::HashMap;
 use std::str::from_utf8;
 
-use time::{Timespec, get_time};
+use time::get_time;
 
 use {DomainName, Port, Id, TcpWrapper, Result, WriteTcp, Error, ServerMsg,
     ClientMsg, };
 use socks::{SocksConnection, Connector, CopyTcp};
+use utils::Timer;
 use protocol::*;
 
 #[derive(Debug)]
@@ -72,7 +72,6 @@ impl Tunnel {
         let stream = TcpStream::connect(server).unwrap();
 
         let tcp = TcpWrapper(stream.try_clone().unwrap());
-        let alive_time = get_time();
         let (sender, receiver) = mpsc::channel();
 
         // A tunnel has two threads. One is `monitor`, which maintains the
@@ -81,7 +80,7 @@ impl Tunnel {
         // handles messages from the monitor and all the ports.
         let cloned_sender = sender.clone();
         thread::spawn(move || {
-            monitor(TcpWrapper(stream), cloned_sender, alive_time);
+            monitor(TcpWrapper(stream), cloned_sender);
         });
 
         thread::spawn(move || {
@@ -102,27 +101,10 @@ impl Tunnel {
     }
 }
 
-pub struct Timer;
 
-impl Timer {
-    pub fn new() -> Receiver<()> {
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let t = Duration::from_millis(HEARTBEAT_INTERVAL_MS as u64);
-            loop {
-                thread::sleep(t);
-                if let Err(_) = sender.send(()) {
-                    break;
-                }
-            }
-        });
-        receiver
-    }
-}
-
-fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
-    let mut alive_time = alive_time;
-    let timer = Timer::new();
+fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
+    let mut alive_time = get_time();
+    let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64);
     loop {
         match timer.try_recv() {
             Ok(_) => {
@@ -139,14 +121,14 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
             _ => break,
         }
 
-        let op = tcp.read_u8().expect("failed to read tunnel");
+        let op = tcp.read_u8().expect("failed to read op");
 
         if op == sc::HEARTBEAT_RSP {
             alive_time = get_time();
             continue
         }
         
-        let id = tcp.read_u32().expect("failed to read tunnel");
+        let id = tcp.read_u32().expect("failed to read id");
 
         match op {
             sc::CLOSE_PORT =>
@@ -156,14 +138,14 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>, alive_time: Timespec) {
                 handler.send(Msg::Server(ServerMsg::ShutdownWrite(id))).unwrap(),
 
             sc::CONNECT_OK => {
-                let len = tcp.read_u32().expect("failed to read tunnel");
-                let buf = tcp.read_size(len as usize).expect("failed to read tunnel");
+                let len = tcp.read_u32().expect("failed to read data length at connect_ok");
+                let buf = tcp.read_size(len as usize).expect("failed to read data of length ..");
                 handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf))).unwrap();
             },
 
             sc::DATA => {
-                let len = tcp.read_u32().expect("failed to read tunnel");
-                let buf = tcp.read_size(len as usize).expect("failed to read tunnel");
+                let len = tcp.read_u32().expect("failed to read data length at data");
+                let buf = tcp.read_size(len as usize).expect("failed to read data of length ..");
                 handler.send(Msg::Server(ServerMsg::Data(id, buf))).unwrap();
             },
 
@@ -287,8 +269,12 @@ impl Connector for TunnelPort {
 
 fn try_parse_domain_name(buf: Vec<u8>) -> Option<SocketAddr> {
     let string = from_utf8(&buf[..]).unwrap_or("");
-    let mut addr = string.to_socket_addrs().unwrap();
-    addr.nth(0)
+    debug!("remote address is {}", &string);
+    if let Ok(mut addr_iter) = string.to_socket_addrs() {
+        addr_iter.nth(0)
+    } else {
+        None
+    }
 }
 
 impl Write for MsgSender {
