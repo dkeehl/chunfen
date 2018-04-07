@@ -57,13 +57,13 @@ struct Tunnel {
 }
 
 // To implement the Write trait, need this wrapper for Sender
-#[derive(Clone)]
-struct MsgSender(Sender<Msg>, Id);
+struct MsgSender(Id, Sender<Msg>);
 
 struct TunnelPort {
     id: Id,
-    sender: MsgSender,
+    sender: Sender<Msg>,
     receiver: Receiver<SocksMsg>,
+    //alive_time: Timespec, // For profiling 
 }
 
 impl Tunnel {
@@ -94,10 +94,10 @@ impl Tunnel {
         let id = self.count;
         // Open a channel between the port and the tunnel. The sender is left,
         // while the receiver is put in the port.
-        let (sender, receiver) = mpsc::sync_channel(10000);
+        let (sender, receiver) = mpsc::sync_channel(1000);
         self.sender.send(Msg::NewPort(id, sender));
         self.count += 1;
-        Ok(TunnelPort { id, sender: MsgSender(self.sender.clone(), id), receiver, })
+        Ok(TunnelPort { id, sender: self.sender.clone() , receiver })
     }
 }
 
@@ -249,7 +249,8 @@ impl WriteTcp<ClientMsg> for TcpWrapper {
 
 impl Connector for TunnelPort {
     fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
-        self.sender.0.send(Msg::Client(ClientMsg::Connect(self.id, addr)));
+        debug!("task {}: connecting to {}", self.id, addr);
+        self.sender.send(Msg::Client(ClientMsg::Connect(self.id, addr)));
         if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
             try_parse_domain_name(buf)
         } else {
@@ -258,7 +259,7 @@ impl Connector for TunnelPort {
     }
 
     fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr> {
-        self.sender.0.send(Msg::Client(ClientMsg::ConnectDN(self.id, dn, port)));
+        self.sender.send(Msg::Client(ClientMsg::ConnectDN(self.id, dn, port)));
         if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
             try_parse_domain_name(buf)
         } else {
@@ -270,11 +271,8 @@ impl Connector for TunnelPort {
 fn try_parse_domain_name(buf: Vec<u8>) -> Option<SocketAddr> {
     let string = from_utf8(&buf[..]).unwrap_or("");
     debug!("remote address is {}", &string);
-    if let Ok(mut addr_iter) = string.to_socket_addrs() {
-        addr_iter.nth(0)
-    } else {
-        None
-    }
+    string.to_socket_addrs().ok()
+        .and_then(|mut addr_iter| addr_iter.nth(0))
 }
 
 impl Write for MsgSender {
@@ -287,7 +285,7 @@ impl Write for MsgSender {
         } else {
             to.write(buf)?
         };
-        self.0.send(Msg::Client(ClientMsg::Data(self.1, to)));
+        self.1.send(Msg::Client(ClientMsg::Data(self.0, to)));
         Ok(res)
     }
 
@@ -297,11 +295,11 @@ impl Write for MsgSender {
 impl CopyTcp for TunnelPort {
     fn copy_tcp(&mut self, stream: TcpStream) -> Result<()> {
         let mut stream_read = stream.try_clone().unwrap();
-        let mut tun_write = self.sender.clone();
+        let mut tun_write = MsgSender(self.id, self.sender.clone());
         thread::spawn(move || {
             copy(&mut stream_read, &mut tun_write);
             stream_read.shutdown(Shutdown::Read).unwrap();
-            tun_write.0.send(Msg::Client(ClientMsg::ShutdownWrite(tun_write.1)));
+            tun_write.1.send(Msg::Client(ClientMsg::ShutdownWrite(tun_write.0)));
         });
 
         let mut stream_write = stream;
@@ -318,6 +316,8 @@ impl CopyTcp for TunnelPort {
 
                 Ok(SocksMsg::ShutdownWrite) => {
                     stream_write.shutdown(Shutdown::Write);
+                    //let total_time = (get_time() - self.alive_time).num_seconds();
+                    //println!("task {}: finished in {}seconds.", self.id, total_time);
                     return Ok(())
                 },
 

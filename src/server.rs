@@ -236,18 +236,25 @@ impl PortMap {
     fn connect(&mut self, id: Id, addr: SocketAddrV4, handler: Sender<Msg>) {
         let mut buf: Vec<u8> = Vec::new();
         if let Some(port) = self.get_mut(id) {
-            if let Ok(stream) = TcpStream::connect(addr) {
-                write!(buf, "{}", stream.local_addr().unwrap());
+            let (sender, receiver) = mpsc::sync_channel(1000);
+            port.set_sender(sender);
 
-                let (sender, receiver) = mpsc::sync_channel(1000);
-                port.set_sender(sender);
-                let cloned_sender = handler.clone();
-                thread::spawn(move || {
-                    copy_stream(id, stream, receiver, cloned_sender);
-                });
-            }
+            // Connect in a new thread, prevent the connect action blocking the
+            // main thread.
+            thread::spawn(move || {
+                if let Ok(stream) = TcpStream::connect(addr) {
+                    write!(buf, "{}", stream.local_addr().unwrap());
+                    // Send before copy, to avoid blocking
+                    handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf)));
+                    copy_stream(id, stream, receiver, handler);
+                } else {
+                    // Connect failed.
+                    handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf)));
+                }
+            });
+        } else { // can't find a port with the very id.
+            handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf)));
         }
-        handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf)));
     }
 
     fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port,
