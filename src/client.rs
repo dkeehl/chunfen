@@ -337,11 +337,13 @@ impl Client {
         let listening = TcpListener::bind(listen_addr).unwrap();
         let mut tunnel = Tunnel::new(server_addr);
 
-        for s in listening.incoming() {
+        listening.incoming().for_each(|s| {
             if let (Ok(stream), Ok(connector)) = (s, tunnel.connect()) { 
-                SocksConnection::new(stream, connector);
+                thread::spawn(move || {
+                    SocksConnection::new(stream, connector);
+                });
             }
-        }
+        });
     }
 }
 

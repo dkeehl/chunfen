@@ -121,7 +121,7 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
             },
 
             None => {
-                println!("request error");
+                println!("client error");
                 break
             },
         }
@@ -239,7 +239,7 @@ impl PortMap {
             let (sender, receiver) = mpsc::sync_channel(1000);
             port.set_sender(sender);
 
-            // Connect in a new thread, prevent the connect action blocking the
+            // Connect in a new thread, to avoid the connect action blocking the
             // main thread.
             thread::spawn(move || {
                 if let Ok(stream) = TcpStream::connect(addr) {
@@ -281,15 +281,15 @@ impl PortMap {
 
 }
 
-struct WritePort(Id, Sender<Msg>);
+struct MsgSender(Id, Sender<Msg>);
 
-impl SenderWithId<Msg> for WritePort {
+impl SenderWithId<Msg> for MsgSender {
     fn get_id(&self) -> Id { self.0 }
 
     fn get_sender(&self) -> &Sender<Msg> { &self.1 }
 }
 
-impl Write for WritePort {
+impl Write for MsgSender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         write_id_data(self, buf, |id, data|
                       Msg::Server(ServerMsg::Data(id, data)))
@@ -301,7 +301,7 @@ impl Write for WritePort {
 fn copy_stream(id: Id, stream: TcpStream, receiver: Receiver<PortMsg>,
                handler: Sender<Msg>) {
     let mut stream_read = stream.try_clone().unwrap();
-    let mut handler = WritePort(id, handler);
+    let mut handler = MsgSender(id, handler);
     thread::spawn(move || {
         io::copy(&mut stream_read, &mut handler);
         stream_read.shutdown(Shutdown::Read).unwrap();

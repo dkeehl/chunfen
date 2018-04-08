@@ -124,10 +124,7 @@ impl SocksConnection {
             match connect_result {
                 Some(SocketAddr::V4(addr)) => {
                     tcp.send(Resp::Success(SocketAddr::V4(addr)));
-                    thread::spawn(move || {
-                        connector.copy_tcp(stream);
-                    });
-                    Ok(())
+                    connector.copy_tcp(stream)
                 },
                 
                 _ => tcp.send(Resp::Fail),
@@ -300,11 +297,13 @@ pub struct Socks5;
 impl Socks5 {
     pub fn bind(listen_addr: &str) {
         let listening = TcpListener::bind(listen_addr).unwrap();
-        for s in listening.incoming() {
-            if let Ok(stream) = s {
+        listening.incoming().for_each(|stream| {
+            if let Ok(s) = stream {
                 let mut connector: SimpleConnector = None;
-                SocksConnection::new(stream, connector);
+                thread::spawn(move || {
+                    SocksConnection::new(s, connector);
+                });
             }
-        }
+        });
     }
 }
