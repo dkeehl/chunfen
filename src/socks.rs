@@ -7,7 +7,7 @@ use std::marker::Send;
 use std::thread;
 use std::str::from_utf8;
 
-use {TcpWrapper, Result, Error, DomainName, Port, WriteTcp, };
+use {TcpWrapper, Result, Error, DomainName, Port, WriteStream, WriteSize, ReadSize};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -123,11 +123,11 @@ impl SocksConnection {
             debug!("connected to outbound? {}", connect_result.is_some());
             match connect_result {
                 Some(SocketAddr::V4(addr)) => {
-                    tcp.send(Resp::Success(SocketAddr::V4(addr)));
+                    tcp.write_stream(Resp::Success(SocketAddr::V4(addr)));
                     connector.copy_tcp(stream)
                 },
                 
-                _ => tcp.send(Resp::Fail),
+                _ => tcp.write_stream(Resp::Fail),
             }
         } else {
             debug!("handshake failed");
@@ -177,7 +177,7 @@ fn handshake(tcp: &mut TcpWrapper) -> Result<Req> {
         Req::Methods(Ver::V5, methods) => {
             let method = select_method(&methods);
             let resp = Resp::Select(Ver::V5, method);
-            tcp.send(resp)?;
+            tcp.write_stream(resp)?;
 
             if method == Method::NoAccp {
                 return Err(Error::SocksRequest);
@@ -200,7 +200,7 @@ fn get_methods(tcp: &mut TcpWrapper) -> Result<Req> {
 
 fn get_command(tcp: &mut TcpWrapper) -> Result<Req> {
     let mut buf = [0u8; 4];
-    tcp.read_to_buf(&mut buf)?;
+    tcp.read_exact(&mut buf)?;
 
     match buf {
         [SOCKS_V5, CMD_CONNECT, RSV, atype] => {
@@ -216,7 +216,7 @@ fn get_addr(tcp: &mut TcpWrapper, atype: u8) -> Result<Addr> {
     match atype {
         ATYP_IP_V4 => {
             let mut buf = [0u8; 4];
-            tcp.read_to_buf(&mut buf)?;
+            tcp.read_exact(&mut buf)?;
             let port = tcp.read_u16()?;
             let [a, b, c, d] = buf;
             Ok(Addr::Ipv4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port)))
@@ -260,25 +260,25 @@ fn parse_method(x: u8) -> Method {
     }
 }
 
-impl WriteTcp<Resp> for TcpWrapper {
-    fn send(&mut self, resp: Resp) -> Result<()> {
+impl WriteStream<Resp> for TcpWrapper {
+    fn write_stream(&mut self, resp: Resp) -> Result<()> {
         match resp {
             Resp::Select(ver, method) => {
                 debug!("select vesion is {:?}, method is {:?}", ver, method);
-                self.write(&[u8::from(ver), u8::from(method)])
+                self.write_all(&[u8::from(ver), u8::from(method)])
             },
 
             Resp::Success(SocketAddr::V4(addr)) => {
                 let [a, b, c, d] = addr.ip().octets();
                 let port = addr.port();
                 debug!("remote address {}.{}.{}.{}, port {}", a, b, c, d, port);
-                self.write(&[SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d])?;
+                self.write_all(&[SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d])?;
                 self.write_u16(port)
             },
 
             Resp::Fail => {
                 debug!("failed");
-                self.write(&[SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0])
+                self.write_all(&[SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0])
             },
 
             _ => unreachable!("unexpected Resp message"),

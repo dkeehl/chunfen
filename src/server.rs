@@ -8,7 +8,8 @@ use std::collections::HashMap;
 
 use time::get_time;
 
-use {TcpWrapper, WriteTcp, Id, DomainName, Port, Result};
+use {TcpWrapper, WriteSize, ReadSize, WriteStream, Id, DomainName, Port, Result,
+    ParseStream,};
 use protocol::*;
 use protocol::{ServerMsg, ClientMsg};
 use utils::*;
@@ -45,53 +46,6 @@ impl Tunnel {
         thread::spawn(move || {
             handler(tcp, receiver, sender);
         });
-    }
-}
-
-trait ParseStream<T> {
-    fn parse_stream(&mut self) -> Option<T>;
-}
-
-impl ParseStream<ClientMsg> for TcpWrapper {
-    fn parse_stream(&mut self) -> Option<ClientMsg> {
-        match self.read_u8() {
-            Ok(cs::HEARTBEAT) => Some(ClientMsg::HeartBeat),
-
-            Ok(op) => {
-                let id = self.read_u32().unwrap();
-                match op {
-                    cs::OPEN_PORT => Some(ClientMsg::OpenPort(id)),
-
-                    cs::CONNECT => {
-                        let buf = self.read_u32()
-                            .and_then(|size| self.read_size(size as usize))
-                            .unwrap();
-                        Some(ClientMsg::Connect(id, buf))
-                    },
-
-                    cs::CONNECT_DOMAIN_NAME => {
-                        let buf = self.read_u32()
-                            .and_then(|size| self.read_size(size as usize))
-                            .unwrap();
-                        let port = self.read_u16().unwrap();
-                        Some(ClientMsg::ConnectDN(id, buf, port))
-                    },
-
-                    cs::DATA => {
-                        let buf = self.read_u32()
-                            .and_then(|size| self.read_size(size as usize))
-                            .unwrap();
-                        Some(ClientMsg::Data(id, buf))
-                    },
-
-                    cs::SHUTDOWN_WRITE => Some(ClientMsg::ShutdownWrite(id)),
-                    
-                    _ => None,
-                }
-            },
-
-            Err(_) => None,
-        }
     }
 }
 
@@ -133,7 +87,7 @@ fn handler(mut tcp: TcpWrapper, receiver: Receiver<Msg>, sender: Sender<Msg>) {
             Ok(Msg::Client(c_msg)) => {
                 match c_msg {
                     ClientMsg::HeartBeat => {
-                        let _ = tcp.send(ServerMsg::HeartBeatRsp);
+                        let _ = tcp.write_stream(ServerMsg::HeartBeatRsp);
                     },
 
                     ClientMsg::OpenPort(id) => {
@@ -170,7 +124,7 @@ fn handler(mut tcp: TcpWrapper, receiver: Receiver<Msg>, sender: Sender<Msg>) {
 
             Ok(Msg::Server(s_msg)) => {
                 // TODO: crypt data here
-                tcp.send(s_msg);
+                tcp.write_stream(s_msg);
             },
 
             Ok(Msg::Shutdown) => {
@@ -332,34 +286,3 @@ fn copy_stream(id: Id, stream: TcpStream, receiver: Receiver<PortMsg>,
     }
 }
 
-impl WriteTcp<ServerMsg> for TcpWrapper {
-    fn send(&mut self, msg: ServerMsg) -> Result<()> {
-        match msg {
-            ServerMsg::HeartBeatRsp => self.write_u8(sc::HEARTBEAT_RSP),
-
-            ServerMsg::ConnectOK(id, buf) => {
-                self.write_u8(sc::CONNECT_OK)
-                    .and(self.write_u32(id))
-                    .and(self.write_u32(buf.len() as u32))
-                    .and(self.write(&buf))
-            },
-
-            ServerMsg::Data(id, buf) => {
-                self.write_u8(sc::DATA)
-                    .and(self.write_u32(id))
-                    .and(self.write_u32(buf.len() as u32))
-                    .and(self.write(&buf))
-            },
-
-            ServerMsg::ShutdownWrite(id) => {
-                self.write_u8(sc::SHUTDOWN_WRITE)
-                    .and(self.write_u32(id))
-            },
-
-            ServerMsg::ClosePort(id) => {
-                self.write_u8(sc::CLOSE_PORT)
-                    .and(self.write_u32(id))
-            },
-        }
-    }
-}

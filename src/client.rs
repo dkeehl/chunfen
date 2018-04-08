@@ -9,7 +9,8 @@ use std::str::from_utf8;
 
 use time::get_time;
 
-use {DomainName, Port, Id, TcpWrapper, Result, WriteTcp, Error,};
+use {DomainName, Port, Id, TcpWrapper, Result, 
+    WriteSize, ReadSize, WriteStream, Error, ParseStream};
 use socks::{SocksConnection, Connector, CopyTcp};
 use utils::Timer;
 use protocol::*;
@@ -27,6 +28,7 @@ enum Msg {
     NewPort(Id, SyncSender<SocksMsg>),
     Server(ServerMsg),
     Client(ClientMsg),
+    Shutdown,
 }
 
 struct PortMap(HashMap<Id, SyncSender<SocksMsg>>);
@@ -112,7 +114,7 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
                 if duration.num_milliseconds() > ALIVE_TIMEOUT_TIME_MS {
                     break;
                 } else {
-                    let _ = handler.send(Msg::Client(ClientMsg::HeartBeat));
+                    handler.send(Msg::Client(ClientMsg::HeartBeat));
                 }
             },
 
@@ -121,38 +123,20 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
             _ => break,
         }
 
-        let op = tcp.read_u8().expect("failed to read op");
-
-        if op == sc::HEARTBEAT_RSP {
-            alive_time = get_time();
-            continue
-        }
-        
-        let id = tcp.read_u32().expect("failed to read id");
-
-        match op {
-            sc::CLOSE_PORT =>
-                handler.send(Msg::Server(ServerMsg::ClosePort(id))).unwrap(),
-
-            sc::SHUTDOWN_WRITE =>
-                handler.send(Msg::Server(ServerMsg::ShutdownWrite(id))).unwrap(),
-
-            sc::CONNECT_OK => {
-                let len = tcp.read_u32().expect("failed to read data length at connect_ok");
-                let buf = tcp.read_size(len as usize).expect("failed to read data of length ..");
-                handler.send(Msg::Server(ServerMsg::ConnectOK(id, buf))).unwrap();
+        match tcp.parse_stream() {
+            Some(msg) => {
+                handler.send(Msg::Server(msg));
+                alive_time = get_time();
             },
 
-            sc::DATA => {
-                let len = tcp.read_u32().expect("failed to read data length at data");
-                let buf = tcp.read_size(len as usize).expect("failed to read data of length ..");
-                handler.send(Msg::Server(ServerMsg::Data(id, buf))).unwrap();
+            None => {
+                println!("Lost connection to server");
+                break
             },
-
-            _ => break,
         }
-        alive_time = get_time();
     }
+    let _ = tcp.shutdown_read();
+    let _ = handler.send(Msg::Shutdown);
 }
 
 fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
@@ -163,7 +147,7 @@ fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
             match msg {
                 Msg::NewPort(id, sender) => {
                     ports.insert(id, sender);
-                    tcp.send(ClientMsg::OpenPort(id));
+                    tcp.write_stream(ClientMsg::OpenPort(id));
                 }
                              
                 Msg::Server(s_msg) => {
@@ -191,58 +175,16 @@ fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
                         
                         _ => {},
                     }
-                    tcp.send(c_msg);
+                    tcp.write_stream(c_msg);
                 },
+
+                Msg::Shutdown => break,
             }
         } else {
             break
         }
     }
-}
-
-impl WriteTcp<ClientMsg> for TcpWrapper {
-    fn send(&mut self, msg: ClientMsg) -> Result<()> {
-        match msg {
-            ClientMsg::HeartBeat => self.write_u8(cs::HEARTBEAT),
-
-            ClientMsg::OpenPort(id) => {
-                self.write_u8(cs::OPEN_PORT)
-                    .and(self.write_u32(id))
-            },
-
-            ClientMsg::Connect(id, buf) => {
-                self.write_u8(cs::CONNECT)
-                    .and(self.write_u32(id))
-                    .and(self.write_u32(buf.len() as u32))
-                    .and(self.write(&buf[..]))
-            },
-
-            ClientMsg::ConnectDN(id, dn, port) => {
-                self.write_u8(cs::CONNECT_DOMAIN_NAME)
-                    .and(self.write_u32(id))
-                    .and(self.write_u32(dn.len() as u32))
-                    .and(self.write(&dn[..]))
-                    .and(self.write_u16(port))
-            },
-
-            ClientMsg::Data(id, buf) => {
-                self.write_u8(cs::DATA)
-                    .and(self.write_u32(id))
-                    .and(self.write_u32(buf.len() as u32))
-                    .and(self.write(&buf[..]))
-            },
-
-            ClientMsg::ShutdownWrite(id) => {
-                self.write_u8(cs::SHUTDOWN_WRITE)
-                    .and(self.write_u32(id))
-            },
-
-            ClientMsg::ClosePort(id) => {
-                self.write_u8(cs::CLOSE_PORT)
-                    .and(self.write_u32(id))
-            },
-        }
-    }
+    let _ = tcp.shutdown_write();
 }
 
 impl Connector for TunnelPort {
@@ -310,7 +252,7 @@ impl CopyTcp for TunnelPort {
                 Ok(SocksMsg::Data(buf)) => {
                     if stream_write.write(&buf[..]).is_err() {
                         stream_write.shutdown(Shutdown::Both);
-                        return Err(Error::TcpIo)
+                        return Err(Error::Io)
                     }
                 },
 
