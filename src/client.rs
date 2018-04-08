@@ -210,9 +210,7 @@ impl WriteTcp<ClientMsg> for TcpWrapper {
                     .and(self.write_u32(id))
             },
 
-            ClientMsg::Connect(id, addr) => {
-                let mut buf = Vec::new();
-                let _ = write!(&mut buf, "{}", addr);
+            ClientMsg::Connect(id, buf) => {
                 self.write_u8(cs::CONNECT)
                     .and(self.write_u32(id))
                     .and(self.write_u32(buf.len() as u32))
@@ -250,7 +248,9 @@ impl WriteTcp<ClientMsg> for TcpWrapper {
 impl Connector for TunnelPort {
     fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
         debug!("task {}: connecting to {}", self.id, addr);
-        self.sender.send(Msg::Client(ClientMsg::Connect(self.id, addr)));
+        let mut buf = Vec::new();
+        let _ = write!(&mut buf, "{}", addr);
+        self.sender.send(Msg::Client(ClientMsg::Connect(self.id, buf)));
         if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
             try_parse_domain_name(buf)
         } else {

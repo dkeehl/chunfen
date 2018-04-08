@@ -66,11 +66,7 @@ impl ParseStream<ClientMsg> for TcpWrapper {
                         let buf = self.read_u32()
                             .and_then(|size| self.read_size(size as usize))
                             .unwrap();
-                        if let Some(SocketAddr::V4(addr)) = parse_domain_name(buf) {
-                            Some(ClientMsg::Connect(id, addr))
-                        } else {
-                            None
-                        }
+                        Some(ClientMsg::Connect(id, buf))
                     },
 
                     cs::CONNECT_DOMAIN_NAME => {
@@ -141,12 +137,17 @@ fn handler(mut tcp: TcpWrapper, receiver: Receiver<Msg>, sender: Sender<Msg>) {
                     },
 
                     ClientMsg::OpenPort(id) => {
-                        ports.add(id);
+                        let _ = ports.add(id);
                     },
 
-                    // TODO: if a port action failed, drop the port.
-                    ClientMsg::Connect(id, addr) => {
-                        ports.connect(id, addr, sender.clone());
+                    // TODO: If a port action failed, drop the port.
+                    ClientMsg::Connect(id, buf) => {
+                        // FIXME: This is ugly. If parsing failed, it doesn't
+                        // response correctly.
+                        // Maybe I can merge Connect and ConnectDN.
+                        if let Some(SocketAddr::V4(addr)) = parse_domain_name(buf) {
+                            ports.connect(id, addr, sender.clone());
+                        }
                     },
 
                     ClientMsg::ConnectDN(id, dn, port) => {
@@ -158,11 +159,11 @@ fn handler(mut tcp: TcpWrapper, receiver: Receiver<Msg>, sender: Sender<Msg>) {
                     },
 
                     ClientMsg::ShutdownWrite(id) => {
-                        ports.shutdown_write(id);
+                        let _ = ports.shutdown_write(id);
                     },
 
                     ClientMsg::ClosePort(id) => {
-                        ports.remove(id);
+                        let _ = ports.remove(id);
                     },
                 }
             },

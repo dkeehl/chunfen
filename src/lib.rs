@@ -38,6 +38,8 @@ type Result<T> = ::std::result::Result<T, Error>;
 
 type Id = u32;
 
+type PortIp = Vec<u8>;
+
 type DomainName = Vec<u8>;
 
 type Port = u16;

@@ -1,5 +1,4 @@
-use std::net::SocketAddrV4;
-use {Id, Port, DomainName};
+use {Id, PortIp, Port, DomainName};
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
 pub const ALIVE_TIMEOUT_TIME_MS: i64 = 60000;
@@ -26,7 +25,7 @@ pub mod sc {
 pub enum ClientMsg {
     HeartBeat,
     OpenPort(Id),
-    Connect(Id, SocketAddrV4),
+    Connect(Id, PortIp),
     ConnectDN(Id, DomainName, Port),
     Data(Id, Vec<u8>),
     ShutdownWrite(Id),
@@ -36,10 +35,36 @@ pub enum ClientMsg {
 
 pub enum ServerMsg {
     HeartBeatRsp,
-    ConnectOK(Id, Vec<u8>),
+    ConnectOK(Id, PortIp),
     Data(Id, Vec<u8>),
     ShutdownWrite(Id),
 
     ClosePort(Id),
 }
 
+/*
+trait Cryptor {
+    fn encrypt(&self, msg: Vec<u8>) -> Vec<u8>;
+    fn decrypt(&self, encrypted_msg: Vec<u8>) -> Vec<u8>;
+}
+
+impl ClientMsg {
+    pub fn encrypt<T: Cryptor>(self, cryptor: &T) -> Self {
+        self
+    }
+
+    pub fn decrypt<T: Cryptor>(self, cryptor: &T) -> Self {
+        self
+    }
+}
+
+impl ServerMsg{
+    pub fn encrypt<T: Cryptor>(self, cryptor: &T) -> Self {
+        self
+    }
+
+    pub fn decrypt<T: Cryptor>(self, cryptor: &T) -> Self {
+        self
+    }
+}
+*/
