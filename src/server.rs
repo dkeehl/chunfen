@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use time::get_time;
 
-use {TcpWrapper, ServerMsg, ClientMsg, WriteTcp, Id,
-     DomainName, Port, Result};
+use {TcpWrapper, WriteTcp, Id, DomainName, Port, Result};
 use protocol::*;
+use protocol::{ServerMsg, ClientMsg};
 use utils::*;
 
 pub struct Server;

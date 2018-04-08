@@ -9,11 +9,11 @@ use std::str::from_utf8;
 
 use time::get_time;
 
-use {DomainName, Port, Id, TcpWrapper, Result, WriteTcp, Error, ServerMsg,
-    ClientMsg, };
+use {DomainName, Port, Id, TcpWrapper, Result, WriteTcp, Error,};
 use socks::{SocksConnection, Connector, CopyTcp};
 use utils::Timer;
 use protocol::*;
+use protocol::{ServerMsg, ClientMsg};
 
 #[derive(Debug)]
 enum SocksMsg {
