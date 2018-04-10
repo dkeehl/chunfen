@@ -46,17 +46,22 @@ type DomainName = Vec<u8>;
 
 type Port = u16;
 
-trait WriteStream<T> {
+// A marker identifies stream types.
+trait Stream {}
+
+trait WriteStream<T>: Stream {
     fn write_stream(&mut self, msg: T) -> Result<()>;
 }
 
-trait ParseStream<T> {
+trait ParseStream<T>: Stream {
     fn parse_stream(&mut self) -> Option<T>;
 }
 
-pub struct TcpWrapper(TcpStream);
+struct TcpWrapper(TcpStream);
 
-pub trait ReadSize {
+impl Stream for TcpWrapper {}
+
+trait ReadSize {
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
 
     fn read_u8(&mut self) -> Result<u8> {
@@ -87,7 +92,7 @@ pub trait ReadSize {
     }
 }
 
-pub trait WriteSize {
+trait WriteSize {
     fn write_all(&mut self, buf: &[u8]) -> Result<()>;
 
     fn write_u8(&mut self, x: u8) -> Result<()> {

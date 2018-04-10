@@ -152,7 +152,7 @@ fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
                              
                 Msg::Server(s_msg) => {
                     match s_msg {
-                        ServerMsg::HeartBeatRsp => unreachable!(),
+                        ServerMsg::HeartBeatRsp => {},
 
                         ServerMsg::ConnectOK(id, buf) => 
                             ports.send(id, SocksMsg::ConnectOK(buf)),

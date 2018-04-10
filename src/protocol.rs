@@ -1,5 +1,5 @@
 use std::marker::Sized;
-use {Id, PortIp, Port, DomainName, Result,
+use {Id, PortIp, Port, DomainName, Result, Stream,
     WriteSize, WriteStream, ReadSize, ParseStream,};
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
@@ -44,67 +44,9 @@ pub enum ServerMsg {
 }
 
 //
-// Data cryption
-//
-pub trait Cryptor {
-    fn encrypt(&self, msg: Vec<u8>) -> Vec<u8>;
-    fn decrypt(&self, encrypted_msg: Vec<u8>) -> Vec<u8>;
-}
-
-pub struct Encrypted<T> {
-    data: T
-}
-
-pub trait Encryptable: Sized {
-    fn map_buf<F>(self, f: F) -> Self where
-        F: FnOnce(Vec<u8>) -> Vec<u8>;
-
-    fn encrypt<T: Cryptor>(self, cryptor: &T) -> Encrypted<Self> {
-        let data = self.map_buf(|buf| cryptor.encrypt(buf));
-        Encrypted { data }
-    }
-
-    fn decrypt<T: Cryptor>(msg: Encrypted<Self>, cryptor: &T) -> Self {
-        let Encrypted { data } = msg;
-        data.map_buf(|buf| cryptor.decrypt(buf))
-    }
-}
-
-impl Encryptable for ClientMsg {
-    fn map_buf<F>(self, f: F) -> Self where
-        F: FnOnce(Vec<u8>) -> Vec<u8>
-    {
-       match self {
-            ClientMsg::Connect(id, buf) =>
-                ClientMsg::Connect(id, f(buf)),
-
-            ClientMsg::ConnectDN(id, dn, port) =>
-                ClientMsg::ConnectDN(id, f(dn), port),
-
-            ClientMsg::Data(id, buf) =>
-                ClientMsg::Data(id, f(buf)),
-
-            msg => msg,
-        }
-    }
-}
-
-impl Encryptable for ServerMsg {
-    fn map_buf<F>(self, f: F) -> Self where
-        F: FnOnce(Vec<u8>) -> Vec<u8>
-    {
-        match self {
-            ServerMsg::ConnectOK(id, buf) => ServerMsg::ConnectOK(id, f(buf)),
-            ServerMsg::Data(id, buf) => ServerMsg::Data(id, f(buf)),
-            msg => msg,
-        }
-    }
-}
-
-//
 // Data transmission layer
 //
-impl<T: WriteSize> WriteStream<ClientMsg> for T {
+impl<T: WriteSize + Stream> WriteStream<ClientMsg> for T {
     fn write_stream(&mut self, msg: ClientMsg) -> Result<()> {
         match msg {
             ClientMsg::HeartBeat => self.write_u8(cs::HEARTBEAT),
@@ -143,7 +85,7 @@ impl<T: WriteSize> WriteStream<ClientMsg> for T {
     }
 }
 
-impl<T: WriteSize> WriteStream<ServerMsg> for T {
+impl<T: WriteSize + Stream> WriteStream<ServerMsg> for T {
     fn write_stream(&mut self, msg: ServerMsg) -> Result<()> {
         match msg {
             ServerMsg::HeartBeatRsp => self.write_u8(sc::HEARTBEAT_RSP),
@@ -171,7 +113,7 @@ impl<T: WriteSize> WriteStream<ServerMsg> for T {
     }
 }
 
-impl<T: ReadSize> ParseStream<ClientMsg> for T {
+impl<T: ReadSize + Stream> ParseStream<ClientMsg> for T {
     fn parse_stream(&mut self) -> Option<ClientMsg> {
         match self.read_u8() {
             Ok(cs::HEARTBEAT) => Some(ClientMsg::HeartBeat),
@@ -209,7 +151,7 @@ impl<T: ReadSize> ParseStream<ClientMsg> for T {
     }
 }
 
-impl<T: ReadSize> ParseStream<ServerMsg> for T {
+impl<T: ReadSize + Stream> ParseStream<ServerMsg> for T {
     fn parse_stream(&mut self) -> Option<ServerMsg> {
         match self.read_u8() {
             Ok(sc::HEARTBEAT_RSP) => Some(ServerMsg::HeartBeatRsp),
