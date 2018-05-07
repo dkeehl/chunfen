@@ -2,12 +2,13 @@ use std::net::{TcpStream, SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs,
                 Shutdown, TcpListener, };
 use std::vec::Vec;
 use std::convert::From;
-use std::io::copy;
+use std::io;
+use std::io::{Read, Write, copy};
 use std::marker::Send;
 use std::thread;
 use std::str::from_utf8;
 
-use {TcpWrapper, Result, Error, DomainName, Port, WriteStream, WriteSize, ReadSize};
+use {Result, Error, DomainName, Port, WriteStream, WriteSize, ReadSize};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -99,7 +100,7 @@ impl SocksConnection {
     pub fn new<T> (stream: TcpStream, connector: T) -> Result<()>
         where T: Connector + CopyTcp + Send + 'static
     {
-        let mut tcp = TcpWrapper(stream.try_clone().unwrap());
+        let mut tcp = stream.try_clone().unwrap();
         let mut connector = connector;
 
         debug!("handshaking");
@@ -127,11 +128,11 @@ impl SocksConnection {
                     connector.copy_tcp(stream)
                 },
                 
-                _ => tcp.write_stream(Resp::Fail),
+                _ => Ok(tcp.write_stream(Resp::Fail)?),
             }
         } else {
             debug!("handshake failed");
-            tcp.shutdown();
+            tcp.shutdown(Shutdown::Both);
             Err(Error::HandshakeFailed)
         }
     }
@@ -146,15 +147,15 @@ impl CopyTcp for SimpleConnector {
         let mut outbound_writer = outbound.try_clone().unwrap();
         thread::spawn(move || {
             copy(&mut client_reader, &mut outbound_writer);
-            client_reader.shutdown(Shutdown::Read).unwrap();
-            outbound_writer.shutdown(Shutdown::Write).unwrap();
+            let _ = client_reader.shutdown(Shutdown::Read);
+            let _ = outbound_writer.shutdown(Shutdown::Write);
         });
 
         let mut outbound_reader = outbound;
         let mut client_writer = stream;
         copy(&mut outbound_reader, &mut client_writer);
-        client_writer.shutdown(Shutdown::Write).unwrap();
-        outbound_reader.shutdown(Shutdown::Read).unwrap();
+        let _ = client_writer.shutdown(Shutdown::Write);
+        let _ = outbound_reader.shutdown(Shutdown::Read);
         Ok(())
     }
 }
@@ -170,7 +171,7 @@ impl Connector for SimpleConnector {
     }
 }
 
-fn handshake(tcp: &mut TcpWrapper) -> Result<Req> {
+fn handshake<T: ReadSize + WriteStream<Resp>>(tcp: &mut T) -> Result<Req> {
     let req = get_methods(tcp)?;
 
     match req {
@@ -190,15 +191,16 @@ fn handshake(tcp: &mut TcpWrapper) -> Result<Req> {
 }
 
 
-fn get_methods(tcp: &mut TcpWrapper) -> Result<Req> {
-    let version = tcp.read_u8().and_then(|x| parse_version(x))?;
+fn get_methods<T: ReadSize>(tcp: &mut T) -> Result<Req> {
+    let version = tcp.read_u8()?;
+    let version = parse_version(version)?;
     let nmethods = tcp.read_u8()?;
     let methods = tcp.read_size(nmethods as usize)?;
     let methods = methods.iter().map(|x| parse_method(*x)).collect();
     Ok(Req::Methods(version, methods))
 }
 
-fn get_command(tcp: &mut TcpWrapper) -> Result<Req> {
+fn get_command<T: ReadSize>(tcp: &mut T) -> Result<Req> {
     let mut buf = [0u8; 4];
     tcp.read_exact(&mut buf)?;
 
@@ -212,7 +214,7 @@ fn get_command(tcp: &mut TcpWrapper) -> Result<Req> {
     }
 }
 
-fn get_addr(tcp: &mut TcpWrapper, atype: u8) -> Result<Addr> {
+fn get_addr<T: ReadSize>(tcp: &mut T, atype: u8) -> Result<Addr> {
     match atype {
         ATYP_IP_V4 => {
             let mut buf = [0u8; 4];
@@ -260,8 +262,8 @@ fn parse_method(x: u8) -> Method {
     }
 }
 
-impl WriteStream<Resp> for TcpWrapper {
-    fn write_stream(&mut self, resp: Resp) -> Result<()> {
+impl WriteStream<Resp> for TcpStream {
+    fn write_stream(&mut self, resp: Resp) -> io::Result<()> {
         match resp {
             Resp::Select(ver, method) => {
                 debug!("select vesion is {:?}, method is {:?}", ver, method);

@@ -3,13 +3,14 @@ use std::net::{TcpStream, TcpListener, SocketAddr, SocketAddrV4, Shutdown,
 use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::{Sender, Receiver,  SyncSender, TryRecvError, };
+use std::io;
 use std::io::{copy, Write};
 use std::collections::HashMap;
 use std::str::from_utf8;
 
 use time::get_time;
 
-use {DomainName, Port, Id, TcpWrapper, Result, 
+use {DomainName, Port, Id, Result, 
     WriteSize, ReadSize, WriteStream, Error, ParseStream};
 use socks::{SocksConnection, Connector, CopyTcp};
 use utils::Timer;
@@ -73,7 +74,7 @@ impl Tunnel {
         // Crash if connection failed
         let stream = TcpStream::connect(server).unwrap();
 
-        let tcp = TcpWrapper(stream.try_clone().unwrap());
+        let tcp = stream.try_clone().unwrap();
         let (sender, receiver) = mpsc::channel();
 
         // A tunnel has two threads. One is `monitor`, which maintains the
@@ -82,7 +83,7 @@ impl Tunnel {
         // handles messages from the monitor and all the ports.
         let cloned_sender = sender.clone();
         thread::spawn(move || {
-            monitor(TcpWrapper(stream), cloned_sender);
+            monitor(stream, cloned_sender);
         });
 
         thread::spawn(move || {
@@ -104,7 +105,7 @@ impl Tunnel {
 }
 
 
-fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
+fn monitor<T: ParseStream<ServerMsg>>(mut tcp: T, handler: Sender<Msg>) {
     let mut alive_time = get_time();
     let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64);
     loop {
@@ -139,7 +140,7 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
     let _ = handler.send(Msg::Shutdown);
 }
 
-fn handler(tcp: TcpWrapper, receiver: Receiver<Msg>) {
+fn handler<T: WriteStream<ClientMsg>>(tcp: T, receiver: Receiver<Msg>) {
     let mut tcp = tcp;
     let mut ports = PortMap::new();
     loop {
@@ -264,7 +265,7 @@ impl CopyTcp for TunnelPort {
                 },
 
                 _ => {
-                    stream_write.shutdown(Shutdown::Both);
+                    let _= stream_write.shutdown(Shutdown::Both);
                     return Err(Error::ServerClosedConnection)
                 },
             }
@@ -280,6 +281,7 @@ impl Client {
         let mut tunnel = Tunnel::new(server_addr);
 
         listening.incoming().for_each(|s| {
+            // TODO: Quit if tunnel broken
             if let (Ok(stream), Ok(connector)) = (s, tunnel.connect()) { 
                 thread::spawn(move || {
                     SocksConnection::new(stream, connector);

@@ -8,8 +8,7 @@ use std::collections::HashMap;
 
 use time::get_time;
 
-use {TcpWrapper, WriteSize, ReadSize, WriteStream, Id, DomainName, Port, Result,
-    ParseStream,};
+use {WriteSize, ReadSize, WriteStream, Id, DomainName, Port, Result, ParseStream,};
 use protocol::*;
 use protocol::{ServerMsg, ClientMsg};
 use utils::*;
@@ -35,12 +34,12 @@ impl Tunnel {
         println!("Request from {}, creat new tunnel.",
                  stream.peer_addr().unwrap());
 
-        let mut tcp = TcpWrapper(stream.try_clone().unwrap());
+        let mut tcp = stream.try_clone().unwrap();
         let (sender, receiver) = mpsc::channel();
 
         let cloned_sender = sender.clone();
         thread::spawn(move || {
-            monitor(TcpWrapper(stream), cloned_sender);
+            monitor(stream, cloned_sender);
         });
 
         thread::spawn(move || {
@@ -55,7 +54,7 @@ enum Msg {
     Shutdown,
 }
 
-fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
+fn monitor<T: ParseStream<ClientMsg>>(mut tcp: T, handler: Sender<Msg>) {
     let mut alive_time = get_time();
     loop {
         let duration = get_time() - alive_time;
@@ -80,7 +79,9 @@ fn monitor(mut tcp: TcpWrapper, handler: Sender<Msg>) {
     let _ = tcp.shutdown_read();
 }
 
-fn handler(mut tcp: TcpWrapper, receiver: Receiver<Msg>, sender: Sender<Msg>) {
+fn handler<T>(mut tcp: T, receiver: Receiver<Msg>, sender: Sender<Msg>) where
+    T: WriteStream<ServerMsg>
+{
     let mut ports = PortMap::new();
     loop {
         match receiver.recv() {

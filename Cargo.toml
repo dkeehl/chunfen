@@ -6,3 +6,4 @@ authors = ["Thomas Lin"]
 [dependencies]
 time = "*"
 log = "*"
+rand = "*"

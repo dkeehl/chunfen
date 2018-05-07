@@ -1,4 +1,5 @@
 use std::marker::Sized;
+use std::io;
 use {Id, PortIp, Port, DomainName, Result, Stream,
     WriteSize, WriteStream, ReadSize, ParseStream,};
 
@@ -47,7 +48,7 @@ pub enum ServerMsg {
 // Data transmission layer
 //
 impl<T: WriteSize + Stream> WriteStream<ClientMsg> for T {
-    fn write_stream(&mut self, msg: ClientMsg) -> Result<()> {
+    fn write_stream(&mut self, msg: ClientMsg) -> io::Result<()> {
         match msg {
             ClientMsg::HeartBeat => self.write_u8(cs::HEARTBEAT),
 
@@ -86,7 +87,7 @@ impl<T: WriteSize + Stream> WriteStream<ClientMsg> for T {
 }
 
 impl<T: WriteSize + Stream> WriteStream<ServerMsg> for T {
-    fn write_stream(&mut self, msg: ServerMsg) -> Result<()> {
+    fn write_stream(&mut self, msg: ServerMsg) -> io::Result<()> {
         match msg {
             ServerMsg::HeartBeatRsp => self.write_u8(sc::HEARTBEAT_RSP),
 
