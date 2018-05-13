@@ -5,6 +5,7 @@
 extern crate log;
 extern crate time;
 extern crate rand;
+extern crate ring;
 
 use std::net::{TcpStream, Shutdown};
 use std::io;

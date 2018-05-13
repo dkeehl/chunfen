@@ -1,9 +1,10 @@
 [package]
 name = "chunfen"
 version = "0.1.0"
-authors = ["Thomas Lin"]
+authors = ["Thomas Lin <dkeehl@gmail.com>"]
 
 [dependencies]
 time = "*"
 log = "*"
 rand = "*"
+ring = "0.12.0"
