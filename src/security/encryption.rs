@@ -3,6 +3,7 @@ use security::{PlainText, CipherText, ContentType, Encrypted,
     BorrowedMessage, TLSError,};
 use security::codec::{self, Codec};
 use security::fragmenter::MAX_FRAGMENT_LEN;
+use security::key_schedule::{derive_traffic_key, derive_traffic_iv};
 use ring;
 
 pub trait MsgEncryptor {
@@ -35,11 +36,11 @@ impl MsgEncryptor {
         Box::new(NoEncryption)
     }
     
-    pub fn new(secret: &[u8]) -> Box<MsgEncryptor> {
-        let hash_alg = &ring::digest::SHA256;
-        let aead_alg = &ring::aead::AES_128_GCM;
-        let enc_key_len: usize = 16;
-        let fixed_iv_len: usize = 12;
+    pub fn new(suite: &SupportedCipherSuite, secret: &[u8]) -> Box<MsgEncryptor> {
+        let hash_alg = suite.get_hash_alg();
+        let aead_alg = suite.get_aead_alg();
+        let enc_key_len = suite.enc_key_len;
+        let fixed_iv_len = suite.fixed_iv_len;
 
         let key = derive_traffic_key(hash_alg, secret, enc_key_len);
         let iv = derive_traffic_iv(hash_alg, secret, fixed_iv_len);
@@ -52,57 +53,16 @@ impl MsgDecryptor {
         Box::new(NoEncryption)
     }
 
-    pub fn new(secret: &[u8]) -> Box<MsgDecryptor> {
-        let hash_alg = &ring::digest::SHA256;
-        let aead_alg = &ring::aead::AES_128_GCM;
-        let enc_key_len: usize = 16;
-        let fixed_iv_len: usize = 12;
+    pub fn new(suite: &SupportedCipherSuite, secret: &[u8]) -> Box<MsgDecryptor> {
+        let hash_alg = suite.get_hash_alg();
+        let aead_alg = suite.get_aead_alg();
+        let enc_key_len = suite.enc_key_len;
+        let fixed_iv_len = suite.fixed_iv_len;
 
         let key = derive_traffic_key(hash_alg, secret, enc_key_len);
         let iv = derive_traffic_iv(hash_alg, secret, fixed_iv_len);
         Box::new(TLS13MessageDecrypter::new(aead_alg, &key, &iv))
     }
-}
-
-fn _hkdf_expand_label_vec(secret: &ring::hmac::SigningKey,
-                          label: &[u8],
-                          context: &[u8],
-                          len: usize) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.resize(len, 0u8);
-    _hkdf_expand_label(&mut v, secret, label, context);
-    v
-}
-
-fn _hkdf_expand_label(output: &mut [u8],
-                      secret: &ring::hmac::SigningKey,
-                      label: &[u8],
-                      context: &[u8]) {
-    let label_prefix = b"tls13 ";
-
-    let mut hkdflabel = Vec::new();
-    (output.len() as u16).encode(&mut hkdflabel);
-    ((label.len() + label_prefix.len()) as u8).encode(&mut hkdflabel);
-    hkdflabel.extend_from_slice(label_prefix);
-    hkdflabel.extend_from_slice(label);
-    (context.len() as u8).encode(&mut hkdflabel);
-    hkdflabel.extend_from_slice(context);
-
-    ring::hkdf::expand(secret, &hkdflabel, output)
-}
-
-fn derive_traffic_key(hash_alg: &'static ring::digest::Algorithm,
-                      secret: &[u8],
-                      len: usize) -> Vec<u8> {
-    _hkdf_expand_label_vec(
-        &ring::hmac::SigningKey::new(hash_alg, secret), b"key", &[], len)
-}
-
-fn derive_traffic_iv(hash_alg: &'static ring::digest::Algorithm,
-                     secret: &[u8],
-                     len: usize) -> Vec<u8> {
-    _hkdf_expand_label_vec(
-        &ring::hmac::SigningKey::new(hash_alg, secret), b"iv", &[], len)
 }
 
 struct TLS13MessageEncrypter {

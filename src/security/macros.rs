@@ -32,6 +32,7 @@ macro_rules! enum_builder {
             }
         }
     };
+    /*
     (@U16
         EnumName: $enum_name: ident;
         EnumVal { $( $enum_var: ident => $enum_val: expr ),* }
@@ -64,4 +65,7 @@ macro_rules! enum_builder {
             }
         }
     };
+    */
 }
+
+

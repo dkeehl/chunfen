@@ -6,6 +6,7 @@ use security::{Session, SessionCommon, PlainText, TLSError, ContentType,};
 pub struct ClientSession {
     common: SessionCommon,
     state: Option<Box<State>>,
+    shared_key: &'static [u8],
 }
 
 impl Read for ClientSession {
@@ -60,11 +61,24 @@ impl Session for ClientSession {
 }
 
 impl ClientSession {
-    pub fn new() -> ClientSession {
+    pub fn new(key: &str) -> ClientSession {
         ClientSession {
             common: SessionCommon::new(),
-            state: Some(Box::new(ExpectTraffic))
+            state: Some(Box::new(ExpectTraffic)),
+            shared_key: key.to_string(),
         }
+    }
+
+    fn take_received_plaintext(&mut self, bytes: Vec<u8>) {
+        self.common.take_received_plaintext(bytes)
+    }
+
+    fn send_alert(&mut self, alert: AlertDescription) {
+        self.common.send_alert(alert)
+    }
+
+    fn send_msg(&mut self, msg: PlainText) {
+        self.common.send_msg(msg)
     }
 
     fn process_msg(&mut self, msg: PlainText) -> Result<(), TLSError> {
@@ -111,71 +125,187 @@ trait State {
         -> NextStateOrError;
 }
 
-struct ExpectTraffic;
-
-impl State for ExpectTraffic {
-    fn handle(self: Box<Self>, session: &mut ClientSession, msg: PlainText)
-        -> NextStateOrError
-    {
-        if let PlainText { content_type: ContentType::ApplicationData,
-        fragment } = msg {
-            session.common.take_received_plaintext(fragment);
-            Ok(self)
-        } else {
-            unreachable!()
-        }
-    }
-}
-/*
-struct ExpectServerHello(SecurityParams);
-
-impl ExpectServerHello {
-    fn into_expect_server_done(self) -> NextState {
-        Box::new(ExpectServerDone(self.0))
-    }
-}
-
-struct ExpectServerDone(SecurityParams);
-
 fn start_handshake(&mut session: ClientSession) -> NextState {
-    let params = SecurityParams::for_client();
-    let random = Random::from_slice(&params.client_random);
-    let hash = client_key_hash(&params.client_random, &session.common.key);
+    let mut hs = HandshakeDetails::new();
+
+    // The client random
+    let mut random = [0u8; 32];
+    thread_rng().fill_bytes(&mut random);
+
+    // handshake, client hello
     let mut fragment = Vec::new();
-    Handshake::ClientHello(random, hash).encode_to(&mut fragment);
+    Handshake::client_hello(random).encode(&mut fragment);
     let ch = PlainText {
         content_type: ContentType::Handshake,
         fragment,
     };
 
-    session.common.send_msg(ch);
+    hs.details.add_message(&ch);
+    session.send_msg(ch);
 
-    let next = ExpectServerHello(params);
+    let next = ExpectServerHello(hs);
     Box::new(next)
+}
+
+struct ExpectServerHello {
+    details: HandshakeDetails,
+}
+
+impl ExpectServerHello {
+    fn into_expect_server_done(self) -> NextState {
+        Box::new(ExpectServerDone(self.details))
+    }
 }
 
 impl State for ExpectServerHello {
     fn handle(self: Box<Self>, session: &mut ClientSession, msg: Plaintext)
         -> NextStateOrError
     {
-        if let PlainText { content_type: ContentType::Handshake, fragment } = msg {
-            if let Some(Handshake::ServerHello(rand, hash)) = decode(fragment) {
-                let hash0 = server_key_hash(&rand, &(*self).0.client_random,
-                &session.common.key);
-                if hash == hash0 {
-                    (*self).0.server_random = rand;
-                    Ok(self.into_expect_server_done())
-                } else {
-                    session.common.send_alert(Alert::Fatal(HANDSHAKE_FAILURE));
-                    Err(TLSError::IncorrectKeyHash)
-                }
-            } else {
-                session.common.send_alert(Alert::Fatal(UNEXPECTED_MESSAGE));
-                Err(TLSError::UnexpectedMessage)
-            }
+        if let Handshake::ServerHello(random) = extract_handshake(&msg)? {
+            self.details.server_random = random;
+            self.details.add_message(&msg);
+            Ok(self.into_expect_server_done())
         } else {
-            unreachable!()
+            Err(TLSError::UnexpectedMessage)
         }
     }
 }
-*/
+
+struct ExpectServerDone {
+    details: HandshakeDetails,
+}
+
+impl ExpectServerDone {
+    fn into_expect_change_cipher_spec(self) -> Box<ExpectChangeCipherSpec> {
+        Box::new(ExpectChangeCipherSpec { self.details })
+    }
+
+    fn emit_finished(&self, session: &mut ClientSession) {
+        let handshake_hash = self.details.get_current_hash();
+        let verify_data =
+            session.get_key_schedule()
+                   .sign_finish(SecretKind::ClientTraffic, &handshake_hash);
+        let mut fragment = Vec::new();
+        Handshake::Finished(verify_data).encode(&mut fragment);
+        let msg = PlainText {
+            ContentType: ContentType::Handshake,
+            fragment
+        };
+        self.details.add_message(&msg);
+        session.send_msg(msg);
+    }
+}
+
+impl State for ExpectServerDone {
+    fn handle(self: Box<Self>, session: &mut ClientSession, msg: Plaintext)
+        -> NextStateOrError
+    {
+        if let Handshake::ServerHelloDone = extract_handshake(&msg)? {
+            self.details.add_message(&msg);
+            session.common.send_change_cipher_spec();
+
+            let suite = session.common.get_suite();
+            let hash_alg = suite.get_hash_alg();
+            let mut key_schedule = KeySchedule::new(hash_alg);
+            key_schedule.input_secret(&self.shared_key);
+            self.details.start_hash(hash_alg);
+            let handshake_hash = self.details.get_current_hash();
+            let write_key = key_schedule.derive(SecretKind::ClientTraffic, &handshake_hash);
+            let read_key = key_schedule.derive(SecretKind::ServerTraffic, &handshake_hash);
+            session.common.set_msg_encryptor(MsgEncryptor::new(&suite, &write_key));
+            session.common.set_msg_decryptor(MsgDecryptor::new(&suite, &read_key));
+
+            key_schedule.current_client_traffic_secret = write_key;
+            key_schedule.current_server_traffic_secret = read_key;
+            session.common.set_key_schedule(key_schedule);
+
+            session.common.we_now_encrypting()
+
+            self.emit_finished(session);
+            Ok(self.into_expect_change_cipher_spec())
+        } else {
+            Err(TLSError::UnexpectedMessage)
+        }
+    }
+}
+
+struct ExpectChangeCipherSpec {
+    details: HandshakeDetails,
+}
+
+impl ExpectChangeCipherSpec {
+    fn into_expect_finished(self) -> Box<ExpectFinished> {
+        Box::new(ExpectFinished { details: self.details })
+    }
+}
+
+impl State for ExpectChangeCipherSpec {
+    fn handle(self: Box<Self>, session: &mut ClientSession, msg: Plaintext)
+        -> NextStateOrError
+    {
+        if let PlainText { ContentType: ChangeCipherSpec, fragment } = msg {
+            if fragment.is_empty() {
+                session.common.peer_now_encrypting();
+                Ok(self.into_expect_finished())
+            } else {
+                Err(TLSError::CorruptData(ContentType::ChangeCipherSpec))
+            }
+        } else {
+            Err(TLSError::UnexpectedMessage)
+        }
+    }
+}
+
+struct ExpectFinished {
+    details: HandshakeDetails,
+}
+
+impl ExpectFinished {
+    fn into_expect_traffic(self) -> Box<ExpectTraffic> {
+        Box::new(ExpectTraffic)
+    }
+
+    fn check_finish_hash(&self, session: &ClientSession, hash: &Hash)
+        -> Result<(), TLSError>
+    {
+        let handshake_hash = self.details.get_current_hash();
+
+        let expect_verify_data =
+            session.get_key_schedule()
+                   .sign_finish(SecretKind::ServerTraffic, &handshake_hash);
+
+        constant_time::verify_slices_are_equal(&expect_verify_data, hash)
+            .map_err(|| TLSError::DecryptError)
+    }
+}
+
+impl State for ExpectFinished {
+    fn handle(self: Box<Self>, session: &mut ClientSession, msg: Plaintext)
+        -> NextStateOrError
+    {
+        if let Handshake::Finished(hash) = extract_handshake(&msg)? {
+            self.check_finish_hash(session, &hash)?;
+            self.details.add_message(&msg);
+            session.common.start_traffic();
+            Ok(self.into_expect_traffic())
+        } else {
+            Err(TLSError::UnexpectedMessage)
+        }
+    }
+}
+
+struct ExpectTraffic;
+
+impl State for ExpectTraffic {
+    fn handle(self: Box<Self>, session: &mut ClientSession, msg: PlainText)
+        -> NextStateOrError
+    {
+        if let PlainText { content_type: ContentType::ApplicationData, fragment } = msg {
+            session.take_received_plaintext(fragment);
+            Ok(self)
+        } else {
+            Err(TLSError::UnexpectedMessage)
+        }
+    }
+}
+

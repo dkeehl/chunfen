@@ -13,6 +13,8 @@ pub mod client;
 pub mod server;
 pub mod encryption;
 pub mod codec;
+pub mod handshake;
+pub mod key_schedule;
 
 #[macro_use]
 mod macros;
@@ -22,51 +24,12 @@ mod test;
 
 use self::codec::{Reader, Codec,};
 use self::encryption::{MsgEncryptor, MsgDecryptor};
-
-/*
-#[derive(Clone, Copy)]
-enum ConnectionEnd {
-    Server,
-    Client,
-}
-
-struct SecurityParams {
-    entity: ConnectionEnd,
-    mac_length: u8,
-    master_secret: [u8; 48],
-    pub client_random: [u8; 32],
-    pub server_random: [u8; 32],
-}
-
-impl SecurityParams {
-    fn new(entity: ConnectionEnd) -> SecurityParams {
-        let mut params = SecurityParams {
-            entity,
-            mac_length: 10,
-            master_secret: [0u8; 48],
-            client_random: [0u8; 32],
-            server_random: [0u8; 32],
-        };
-        match entity {
-            ConnectionEnd::Client => thread_rng().fill_bytes(&mut params.client_random),
-            ConnectionEnd::Server => thread_rng().fill_bytes(&mut params.server_random),
-        }
-        params
-    }
-
-    pub fn for_client() -> SecurityParams {
-        Self::new(ConnectionEnd::Client)
-    }
-
-    pub fn for_server() -> SecurityParams {
-        Self::new(ConnectionEnd::Server)
-    }
-}
-*/
+use self::key_schedule::KeySchedule;
 
 enum_builder! {@U8
     EnumName: ContentType;
     EnumVal {
+        ChangeCipherSpec => 0x14,
         Alert => 0x15,
         Handshake => 0x16,
         ApplicationData => 0x17
@@ -204,61 +167,6 @@ enum_builder! {@U8
         NoApplicationProtocol => 0x78
     }
 }
-
-/*
-struct Random([u8; 32]);
-
-impl Random {
-    fn from_slice(bytes: &[u8]) -> Random {
-        if bytes.len() >= 32 {
-            let mut rands = [0u8; 32];
-            rands[..].copy_from_slice(&bytes[..32]);
-            Random(rands)
-        } else {
-            panic!()
-        }
-    }
-}
-
-const VERIFY_DATA_LENGTH: usize = 12;
-
-type VerifyData = [u8; VERIFY_DATA_LENGTH];
-
-enum Handshake {
-    ClientHello(Random, KeyHash),
-    ServerHello(Random, KeyHash),
-    ServerHelloDone,
-    Finished(VerifyData),
-}
-
-const CLIENT_HELLO: u8 = 1;
-
-impl Handshake {
-    fn encode_to(self, buf: &mut Vec<u8>) {
-        match self {
-            Handshake::ClientHello(rands) => {
-                buf.push(CLIENT_HELLO);
-                buf.extend_from_slice(rands[..])
-            },
-            _ => (),
-        }
-    }
-
-    fn decode(buf: Vec<u8>) -> Option<Self> {
-        None
-    }
-}
-
-struct HandshakeJoiner {
-    pub frames: VecDeque<PlainText>,
-    buf: Vec<u8>,
-}
-
-impl HandshakeJoiner {
-    fn take_message(&mut self, msg: PlainText) -> Result<(), TLSError> {
-    }
-}
-*/
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TLSError {
@@ -432,11 +340,14 @@ struct SessionCommon {
     pub traffic: bool,
     pub peer_eof: bool,
 
+    we_encrypting: bool,
+    peer_encrypting: bool,
+
     // Outcoming: sendable_plaintext -> sendable_tls
     // Incoming: msg_deframer -> received_plaintext
-    sendable_plaintext: VecBuffer,  // raw data
+    sendable_plaintext: VecBuffer,  // application data, raw
     sendable_tls: VecBuffer,        // raw data
-    received_plaintext: VecBuffer,  // raw data
+    received_plaintext: VecBuffer,  // application data, raw
 
     // Buffers incoiming tls cipher text, parsed
     pub msg_deframer: MsgDeframer,
@@ -447,13 +358,20 @@ struct SessionCommon {
     pub read_seq: u64,
     msg_encryptor: Box<MsgEncryptor>,
     msg_decryptor: Box<MsgDecryptor>,
+
+    suite: Option<&'static SupportedCipherSuite>,
+    key_schedule: Option<KeySchedule>,
 }
 
 impl SessionCommon {
     pub fn new() -> SessionCommon {
         SessionCommon {
-            traffic: true, // TODO set to false to enable handshake
+            traffic: false,
             peer_eof: false,
+
+            we_encrypting: false,
+            peer_encrypting: false,
+
             sendable_plaintext: VecBuffer::new(),
             sendable_tls: VecBuffer::new(),
             received_plaintext: VecBuffer::new(),
@@ -465,6 +383,7 @@ impl SessionCommon {
             read_seq: 0,
             msg_encryptor: MsgEncryptor::plain(),
             msg_decryptor: MsgDecryptor::plain(),
+            key_schedule: None,
         }
     }
 
@@ -573,6 +492,28 @@ impl SessionCommon {
 
     pub fn send_close_notify(&mut self) {
         self.send_alert(AlertDescription::CloseNotify)
+    }
+
+    pub fn we_now_encrypting(&mut self) { self.we_encrypting = true }
+
+    pub fn peer_now_encrypting(&mut self) { self.peer_encrypting = true }
+
+    pub fn start_traffic(&mut self) { self.traffic = true }
+
+    pub fn set_key_schedule(&mut self, ks: KeySchedule) {
+        self.key_schedule = Some(ks);
+    }
+
+    pub fn get_key_schedule(&self) -> &KeySchedule {
+        self.key_schedule.as_ref().unwrap()
+    }
+
+    pub fn set_msg_encryptor(&mut self, enc: Box<MsgEncryptor>) {
+        self.msg_encryptor = enc;
+    }
+
+    pub fn set_msg_decryptor(&mut self, dec: Box<MsgDecryptor>) {
+        self.msg_decryptor = dec;
     }
 }
 
