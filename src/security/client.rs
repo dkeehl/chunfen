@@ -161,8 +161,7 @@ impl State for ExpectServerHello {
     fn handle(self: Box<Self>, session: &mut ClientSession, msg: Plaintext)
         -> NextStateOrError
     {
-        if let Handshake::ServerHello(random) = extract_handshake(&msg)? {
-            self.details.server_random = random;
+        if let Handshake::ServerHello(_) = extract_handshake(&msg)? {
             self.details.add_message(&msg);
             Ok(self.into_expect_server_done())
         } else {
