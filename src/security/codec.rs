@@ -45,6 +45,12 @@ impl<'a> Reader<'a> {
     pub fn sub(&mut self, len: usize) -> Option<Reader> {
         self.take(len).and_then(|bytes| Some(Reader::init(bytes)))
     }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(self.buf);
+        buf
+    }
 }
 
 /// Things we can encode and read from a Reader.

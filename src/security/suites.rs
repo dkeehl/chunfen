@@ -1,19 +1,20 @@
+use ring;
 
 #[allow(non_camel_case_types)]
 pub enum BulkAlgorithm {
     AES_128_GCM,
-    /// AES_256_GCM,
-    /// CHACHA20_POLY1305,
+    // AES_256_GCM,
+    // CHACHA20_POLY1305,
 }
 
 pub enum HashAlgorithm {
-    /// NONE,
-    /// MD5,
-    /// SHA1,
-    /// SHA224,
+    // NONE,
+    // MD5,
+    // SHA1,
+    // SHA224,
     SHA256,
-    /// SHA384,
-    /// SHA512,
+    // SHA384,
+    // SHA512,
 }
 
 pub struct SupportedCipherSuite {

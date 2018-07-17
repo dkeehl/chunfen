@@ -9,15 +9,16 @@ use std::error::Error;
 
 use rand::{Rng, thread_rng};
 
+#[macro_use]
+mod macros;
+
 pub mod client;
 pub mod server;
 pub mod encryption;
 pub mod codec;
 pub mod handshake;
 pub mod key_schedule;
-
-#[macro_use]
-mod macros;
+pub mod suites;
 
 #[cfg(test)]
 mod test;
@@ -25,6 +26,7 @@ mod test;
 use self::codec::{Reader, Codec,};
 use self::encryption::{MsgEncryptor, MsgDecryptor};
 use self::key_schedule::KeySchedule;
+use self::suites::{SupportedCipherSuite, TLS13_AES_128_GCM_SHA256};
 
 enum_builder! {@U8
     EnumName: ContentType;
@@ -176,6 +178,7 @@ pub enum TLSError {
     DecryptError,
     PeerSentOversizedRecord,
     PeerMisbehavedError(String),
+    UnexpectedMessage,
 }
 
 impl fmt::Display for TLSError {
@@ -203,6 +206,7 @@ impl Error for TLSError {
             TLSError::General(_) => "unexpected error",
             TLSError::PeerSentOversizedRecord => "peer sent excess record size",
             TLSError::PeerMisbehavedError(_) => "peer misbehaved",
+            TLSError::UnexpectedMessage => "unexpected tls message",
         }
     }
 }
@@ -383,6 +387,9 @@ impl SessionCommon {
             read_seq: 0,
             msg_encryptor: MsgEncryptor::plain(),
             msg_decryptor: MsgDecryptor::plain(),
+
+            // TODO: negotiate to determin a suite
+            suite: Some(&TLS13_AES_128_GCM_SHA256), 
             key_schedule: None,
         }
     }
@@ -490,6 +497,14 @@ impl SessionCommon {
         }
     }
 
+    pub fn send_change_cipher_spec(&mut self) {
+        let ccs = PlainText {
+            content_type: ContentType::ChangeCipherSpec,
+            fragment: Vec::new(),
+        };
+        self.send_single_fragment(ccs.to_borrowed())
+    }
+
     pub fn send_close_notify(&mut self) {
         self.send_alert(AlertDescription::CloseNotify)
     }
@@ -506,6 +521,10 @@ impl SessionCommon {
 
     pub fn get_key_schedule(&self) -> &KeySchedule {
         self.key_schedule.as_ref().unwrap()
+    }
+
+    pub fn get_suite(&self) -> &'static SupportedCipherSuite {
+        self.suite.as_ref().unwrap()
     }
 
     pub fn set_msg_encryptor(&mut self, enc: Box<MsgEncryptor>) {

@@ -4,6 +4,7 @@ use security::{PlainText, CipherText, ContentType, Encrypted,
 use security::codec::{self, Codec};
 use security::fragmenter::MAX_FRAGMENT_LEN;
 use security::key_schedule::{derive_traffic_key, derive_traffic_iv};
+use security::suites::SupportedCipherSuite;
 use ring;
 
 pub trait MsgEncryptor {

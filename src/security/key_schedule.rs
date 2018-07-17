@@ -1,3 +1,7 @@
+use security::AlertDescription;
+use security::codec::Codec;
+
+use rand::thread_rng;
 use ring::{hmac, digest, hkdf};
 
 pub struct KeySchedule {
@@ -79,7 +83,7 @@ impl SecretKind {
     }
 }
 
-fn _hkdf_expand_label_vec(secret: &ring::hmac::SigningKey,
+fn _hkdf_expand_label_vec(secret: &hmac::SigningKey,
                           label: &[u8],
                           context: &[u8],
                           len: usize) -> Vec<u8> {
@@ -90,7 +94,7 @@ fn _hkdf_expand_label_vec(secret: &ring::hmac::SigningKey,
 }
 
 fn _hkdf_expand_label(output: &mut [u8],
-                      secret: &ring::hmac::SigningKey,
+                      secret: &hmac::SigningKey,
                       label: &[u8],
                       context: &[u8]) {
     let label_prefix = b"tls13 ";
@@ -103,20 +107,20 @@ fn _hkdf_expand_label(output: &mut [u8],
     (context.len() as u8).encode(&mut hkdflabel);
     hkdflabel.extend_from_slice(context);
 
-    ring::hkdf::expand(secret, &hkdflabel, output)
+    hkdf::expand(secret, &hkdflabel, output)
 }
 
-pub fn derive_traffic_key(hash_alg: &'static ring::digest::Algorithm,
+pub fn derive_traffic_key(hash_alg: &'static digest::Algorithm,
                       secret: &[u8],
                       len: usize) -> Vec<u8> {
     _hkdf_expand_label_vec(
-        &ring::hmac::SigningKey::new(hash_alg, secret), b"key", &[], len)
+        &hmac::SigningKey::new(hash_alg, secret), b"key", &[], len)
 }
 
-pub fn derive_traffic_iv(hash_alg: &'static ring::digest::Algorithm,
+pub fn derive_traffic_iv(hash_alg: &'static digest::Algorithm,
                      secret: &[u8],
                      len: usize) -> Vec<u8> {
     _hkdf_expand_label_vec(
-        &ring::hmac::SigningKey::new(hash_alg, secret), b"iv", &[], len)
+        &hmac::SigningKey::new(hash_alg, secret), b"iv", &[], len)
 }
 

@@ -1,3 +1,9 @@
+use std::io::Write;
+use security::{ContentType, PlainText, TLSError,};
+use security::codec::{Reader, Codec, self,};
+
+use ring::digest;
+
 enum_builder! {@U8
     EnumName: HandshakeType;
     EnumVal{
@@ -14,7 +20,7 @@ enum_builder! {@U8
         ServerHelloDone => 0x0e,
         //CertificateVerify => 0x0f,
         ClientKeyExchange => 0x10,
-        Finished => 0x14,
+        Finished => 0x14
         //CertificateURL => 0x15,
         //CertificateStatus => 0x16,
         //KeyUpdate => 0x18,
@@ -24,6 +30,7 @@ enum_builder! {@U8
 
 pub type Hash = Vec<u8>;
 
+#[derive(Debug)]
 pub struct Random([u8; 32]);
 
 impl Codec for Random {
@@ -33,7 +40,7 @@ impl Codec for Random {
 
     fn read(r: &mut Reader) -> Option<Random> {
         let mut opaque = [0; 32];
-        r.take(32).ok().map(|bytes| {
+        r.take(32).map(|bytes| {
             opaque.clone_from_slice(bytes);
             Random(opaque)
         })
@@ -46,10 +53,10 @@ impl Random {
         Random::read(&mut rd).unwrap()
     }
 
-    pub fn write_slice(&self, bytes: &mut [u8]) {
-        let buf = self.get_encoding();
-        bytes.write_all(&buf).unwrap();
-    }
+    //pub fn write_slice(&self, mut bytes: &[u8]) {
+    //    let buf = self.get_encoding();
+    //    bytes.write_all(&buf).unwrap();
+    //}
 }
 
 /*
@@ -71,6 +78,7 @@ impl Codec for HelloPayload {
 }
 */
 
+#[derive(Debug)]
 pub enum Handshake {
     ClientHello(Random),
     ServerHello(Random),
@@ -83,19 +91,23 @@ impl Handshake {
     pub fn client_hello(rand: [u8; 32]) -> Handshake {
         Handshake::ClientHello(Random(rand))
     }
+
+    pub fn server_hello(rand: [u8; 32]) -> Handshake {
+        Handshake::ServerHello(Random(rand))
+    }
 }
 
 impl Codec for Handshake {
     fn encode(&self, bytes: &mut Vec<u8>) {
         match *self {
-            Handshake::ClientHello(rand) => {
+            Handshake::ClientHello(ref rand) => {
                 HandshakeType::ClientHello.encode(bytes);
                 let mut buf = Vec::new();
                 rand.encode(&mut buf);
                 codec::u24(buf.len() as u32).encode(bytes);
                 bytes.append(&mut buf);
             }
-            Handshake::ServerHello(rand) => {
+            Handshake::ServerHello(ref rand) => {
                 HandshakeType::ServerHello.encode(bytes);
                 let mut buf = Vec::new();
                 rand.encode(&mut buf);
@@ -106,15 +118,15 @@ impl Codec for Handshake {
                 HandshakeType::ServerHelloDone.encode(bytes);
                 codec::u24(0).encode(bytes);
             }
-            Handshake::ClientKeyExchange(sec) => {
+            Handshake::ClientKeyExchange(ref sec) => {
                 HandshakeType::ClientKeyExchange.encode(bytes);
                 codec::u24(sec.len() as u32).encode(bytes);
-                bytes.extend_from_slice(&sec);
+                bytes.extend_from_slice(sec);
             }
-            Handshake::Finished(data) => {
+            Handshake::Finished(ref data) => {
                 HandshakeType::Finished.encode(bytes);
                 codec::u24(data.len() as u32).encode(bytes);
-                bytes.extend_from_slice(&data);
+                bytes.extend_from_slice(data);
             }
         }
     }
@@ -122,7 +134,7 @@ impl Codec for Handshake {
     fn read(r: &mut Reader) -> Option<Handshake> {
         HandshakeType::read(r).and_then(|typ| 
         codec::u24::read(r).and_then(   |len| 
-        r.sub(len.0 as usize).and_then( |sub| 
+        r.sub(len.0 as usize).and_then( |mut sub| 
         match typ {
             HandshakeType::ClientHello =>
                 Random::read(&mut sub)
@@ -150,8 +162,8 @@ impl Codec for Handshake {
 }
 
 pub fn extract_handshake(msg: &PlainText) -> Result<Handshake, TLSError> {
-    if let PlainText { content_type: ContentType::Handshake, fragment } = *msg {
-        let mut r = Reader::init(&fragment);
+    if let PlainText { content_type: ContentType::Handshake, ref fragment } = *msg {
+        let mut r = Reader::init(fragment);
         Handshake::read(&mut r)
             .ok_or(TLSError::CorruptData(ContentType::Handshake))
     } else {
@@ -165,8 +177,8 @@ pub struct HandshakeDetails {
 }
 
 impl HandshakeDetails {
-    pub fn new() -> SecurityParams {
-        SecurityParams {
+    pub fn new() -> HandshakeDetails {
+        HandshakeDetails {
             error: None,
             transcript: HandshakeHash::new(),
         }
@@ -214,15 +226,15 @@ impl HandshakeHash {
 
         let mut ctx = digest::Context::new(alg);
         ctx.update(&self.buffer);
-        self.ctx = ctx
+        self.ctx = Some(ctx)
     }
 
     fn add_message(&mut self, m: &PlainText) {
         match *m {
-            PlainText { content_type: ContentType::Handshake, fragment } => {
-                self.update_raw(&fragment);
+            PlainText { content_type: ContentType::Handshake, ref fragment } => {
+                self.update_raw(fragment);
             },
-            _ => unreachable!
+            _ => unreachable!()
         }
     }
 
