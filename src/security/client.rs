@@ -79,8 +79,8 @@ impl ClientSession {
         self.common.take_received_plaintext(bytes)
     }
 
-    fn send_alert(&mut self, alert: AlertDescription) {
-        self.common.send_alert(alert)
+    fn send_close_notify(&mut self) {
+        self.common.send_close_notify()
     }
 
     fn send_msg(&mut self, msg: PlainText) {
@@ -93,36 +93,24 @@ impl ClientSession {
 
     fn process_msg(&mut self, msg: PlainText) -> Result<(), TLSError> {
         match msg.content_type {
-            /*
-            ContentType::Handshake => {
-                self.common.handshake_joiner.take_message(msg)
-                    .ok_or_else(|| {
-                        self.common.send_alert(AlertDescription::DecryptError);
-                        TLSError::CorruptData(ContentType::Handshake)
-                    })?;
-                self.process_new_handshake_message()
-            },
-            */
-
             ContentType::Alert => self.common.process_alert(msg),
 
             _ => self.process_main_protocol(msg),
         }
     }
 
-    /*
-    fn process_new_handshake_message(&mut self) -> Result<(), TLSError> {
-        while let Some(msg) = self.common.handshake_joiner.frames.pop_front() {
-            self.process_main_protocol(msg)?
-        }
-        Ok(())
-    }
-    */
-
     fn process_main_protocol(&mut self, msg: PlainText) -> Result<(), TLSError> {
         let state = self.state.take().unwrap();
-        self.state = Some(state.handle(self, msg)?);
-        Ok(())
+        match state.handle(self, msg) {
+            Ok(new_state) => {
+                self.state = Some(new_state);
+                Ok(())
+            },
+            Err(e) => {
+                self.send_close_notify();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -176,6 +164,7 @@ impl State for ExpectServerHello {
             self.details.add_message(&msg);
             Ok(self.into_expect_server_done())
         } else {
+            warn!("unexpected message, expect server hello");
             Err(TLSError::UnexpectedMessage)
         }
     }
@@ -186,12 +175,6 @@ struct ExpectServerDone {
 }
 
 impl ExpectServerDone {
-    /*
-    fn into_expect_change_cipher_spec(self) -> Box<ExpectChangeCipherSpec> {
-        Box::new(ExpectChangeCipherSpec { details: self.details })
-    }
-    */
-
     fn into_expect_finished(self) -> Box<ExpectFinished> {
         Box::new(ExpectFinished { details: self.details })
     }
@@ -219,7 +202,6 @@ impl State for ExpectServerDone {
         if let Handshake::ServerHelloDone = extract_handshake(&msg)? {
             trace!("Got server hello done");
             self.details.add_message(&msg);
-            //session.common.send_change_cipher_spec();
 
             let suite = session.common.get_suite();
             let hash_alg = suite.get_hash_alg();
@@ -236,43 +218,15 @@ impl State for ExpectServerDone {
             key_schedule.current_server_traffic_secret = read_key;
             session.common.set_key_schedule(key_schedule);
 
-            //session.common.we_now_encrypting();
-            //session.common.peer_now_encrypting();
-
             trace!("Client finished, waiting for server finish");
             self.emit_finished(session);
             Ok(self.into_expect_finished())
         } else {
+            warn!("unexpected message, expect server done");
             Err(TLSError::UnexpectedMessage)
         }
     }
 }
-
-/*
-struct ExpectChangeCipherSpec {
-    details: HandshakeDetails,
-}
-
-impl ExpectChangeCipherSpec {
-}
-
-impl State for ExpectChangeCipherSpec {
-    fn handle(mut self: Box<Self>, session: &mut ClientSession, msg: PlainText)
-        -> NextStateOrError
-    {
-        if let PlainText { content_type: ContentType::ChangeCipherSpec, fragment } = msg {
-            if fragment.is_empty() {
-                trace!("Got server ccs, waiting for server finish");
-                Ok(self.into_expect_finished())
-            } else {
-                Err(TLSError::CorruptData(ContentType::ChangeCipherSpec))
-            }
-        } else {
-            Err(TLSError::UnexpectedMessage)
-        }
-    }
-}
-*/
 
 struct ExpectFinished {
     details: HandshakeDetails,
@@ -293,7 +247,10 @@ impl ExpectFinished {
                    .sign_finish(SecretKind::ServerTraffic, &handshake_hash);
 
         constant_time::verify_slices_are_equal(&expect_verify_data, hash)
-            .map_err(|_| TLSError::DecryptError)
+            .map_err(|_| {
+                warn!("then server's finish hash is incorrect!");
+                TLSError::DecryptError
+            })
     }
 }
 
@@ -309,6 +266,7 @@ impl State for ExpectFinished {
             session.common.start_traffic();
             Ok(self.into_expect_traffic())
         } else {
+            warn!("unexpected message, expect server finish");
             Err(TLSError::UnexpectedMessage)
         }
     }
@@ -324,6 +282,7 @@ impl State for ExpectTraffic {
             session.take_received_plaintext(fragment);
             Ok(self)
         } else {
+            warn!("unexpected message, expect application data");
             Err(TLSError::UnexpectedMessage)
         }
     }

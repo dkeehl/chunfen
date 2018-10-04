@@ -144,30 +144,30 @@ impl Codec for CipherText {
 enum_builder! {@U8
     EnumName: AlertDescription;
     EnumVal {
-        CloseNotify => 0x00,
-        UnexpectedMessage => 0x0a,
-        BadRecordMac => 0x14,
-        DecryptionFailed => 0x15,
-        RecordOverflow => 0x16,
-        HandshakeFailure => 0x28,
-        NoCertificate => 0x29,
-        BadCertificate => 0x2a,
-        UnsupportedCertificate => 0x2b,
-        CertificateRevoked => 0x2c,
-        CertificateExpired => 0x2d,
-        CertificateUnknown => 0x2e,
-        IllegalParameter => 0x2f,
-        AccessDenied => 0x31,
-        DecodeError => 0x32,
-        DecryptError => 0x33,
-        InternalError => 0x50,
-        CertificateUnobtainable => 0x6f,
-        UnrecognisedName => 0x70,
-        BadCertificateStatusResponse => 0x71,
-        BadCertificateHashValue => 0x72,
-        UnknownPSKIdentity => 0x73,
-        CertificateRequired => 0x74,
-        NoApplicationProtocol => 0x78
+        CloseNotify => 0x00
+        //UnexpectedMessage => 0x0a,
+        //BadRecordMac => 0x14,
+        //DecryptionFailed => 0x15,
+        //RecordOverflow => 0x16,
+        //HandshakeFailure => 0x28,
+        //NoCertificate => 0x29,
+        //BadCertificate => 0x2a,
+        //UnsupportedCertificate => 0x2b,
+        //CertificateRevoked => 0x2c,
+        //CertificateExpired => 0x2d,
+        //CertificateUnknown => 0x2e,
+        //IllegalParameter => 0x2f,
+        //AccessDenied => 0x31,
+        //DecodeError => 0x32,
+        //DecryptError => 0x33,
+        //InternalError => 0x50,
+        //CertificateUnobtainable => 0x6f,
+        //UnrecognisedName => 0x70,
+        //BadCertificateStatusResponse => 0x71,
+        //BadCertificateHashValue => 0x72,
+        //UnknownPSKIdentity => 0x73,
+        //CertificateRequired => 0x74,
+        //NoApplicationProtocol => 0x78
     }
 }
 
@@ -345,9 +345,6 @@ struct SessionCommon {
     pub traffic: bool,
     pub peer_eof: bool,
 
-    we_encrypting: bool,
-    peer_encrypting: bool,
-
     // Outcoming: sendable_plaintext -> sendable_tls
     // Incoming: msg_deframer -> received_plaintext
     sendable_plaintext: VecBuffer,  // application data, raw
@@ -371,9 +368,6 @@ impl SessionCommon {
         SessionCommon {
             traffic: false,
             peer_eof: false,
-
-            we_encrypting: false,
-            peer_encrypting: false,
 
             sendable_plaintext: VecBuffer::new(),
             sendable_tls: VecBuffer::new(),
@@ -471,6 +465,8 @@ impl SessionCommon {
     }
 
     pub fn process_alert(&mut self, msg: PlainText) -> Result<(), TLSError> {
+        error!("Alert received!");
+
         if let Some(Message::Alert(desc)) = msg.decode() {
             if desc == AlertDescription::CloseNotify {
                 self.peer_eof = true;
@@ -496,21 +492,9 @@ impl SessionCommon {
         }
     }
 
-    pub fn send_change_cipher_spec(&mut self) {
-        let ccs = PlainText {
-            content_type: ContentType::ChangeCipherSpec,
-            fragment: Vec::new(),
-        };
-        self.send_single_fragment(ccs.to_borrowed())
-    }
-
     pub fn send_close_notify(&mut self) {
         self.send_alert(AlertDescription::CloseNotify)
     }
-
-    pub fn we_now_encrypting(&mut self) { self.we_encrypting = true }
-
-    pub fn peer_now_encrypting(&mut self) { self.peer_encrypting = true }
 
     pub fn start_traffic(&mut self) { self.traffic = true }
 
