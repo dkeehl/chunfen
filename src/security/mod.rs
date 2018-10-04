@@ -88,6 +88,7 @@ enum Message {
     Opaque(Vec<u8>),
 }
 
+#[derive(Debug)]
 pub struct BorrowedMessage<'a> {
     pub ty: ContentType,
     pub fragment: &'a [u8],
@@ -355,8 +356,6 @@ struct SessionCommon {
 
     // Buffers incoiming tls cipher text, parsed
     pub msg_deframer: MsgDeframer,
-
-    //pub handshake_joiner: HandshakeJoiner,
 
     pub write_seq: u64,
     pub read_seq: u64,
@@ -711,4 +710,3 @@ impl VecBuffer {
         }
     }
 }
-

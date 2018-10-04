@@ -197,12 +197,13 @@ mod test {
     use security::{PlainText, ContentType};
     use security::codec::Codec;
     use super::{MsgEncryptor, MsgDecryptor};
+    use security::suites::TLS13_AES_128_GCM_SHA256;
 
     const SECRET: &[u8] = b"encryption_test";
 
     #[test]
     fn encryptions_change_data() {
-        let e = MsgEncryptor::new(SECRET);
+        let e = MsgEncryptor::new(&TLS13_AES_128_GCM_SHA256, SECRET);
 
         for i in 0..5 {
             let mut buf = [0u8; 100];
@@ -223,8 +224,8 @@ mod test {
 
     #[test]
     fn decrypt_encryption_id() {
-        let e = MsgEncryptor::new(SECRET);
-        let d = MsgDecryptor::new(SECRET);
+        let e = MsgEncryptor::new(&TLS13_AES_128_GCM_SHA256, SECRET);
+        let d = MsgDecryptor::new(&TLS13_AES_128_GCM_SHA256, SECRET);
 
         for i in 0..5 {
             let mut buf = [0u8; 100];

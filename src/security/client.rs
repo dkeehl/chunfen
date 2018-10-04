@@ -61,19 +61,18 @@ impl Session for ClientSession {
         }
         Ok(())
     }
-
-    //fn send_close_notify(&mut self) {
-    //    self.common.send_close_notify()
-    //}
 }
 
 impl ClientSession {
     pub fn new(key: &'static str) -> ClientSession {
-        ClientSession {
+        let mut cs = ClientSession {
             common: SessionCommon::new(),
-            state: Some(Box::new(ExpectTraffic)),
+            state: None,
             shared_key: key.as_bytes(),
-        }
+        };
+
+        cs.state = Some(start_handshake(&mut cs));
+        cs
     }
 
     fn take_received_plaintext(&mut self, bytes: Vec<u8>) {
@@ -94,17 +93,16 @@ impl ClientSession {
 
     fn process_msg(&mut self, msg: PlainText) -> Result<(), TLSError> {
         match msg.content_type {
+            /*
             ContentType::Handshake => {
-                /*
                 self.common.handshake_joiner.take_message(msg)
                     .ok_or_else(|| {
                         self.common.send_alert(AlertDescription::DecryptError);
                         TLSError::CorruptData(ContentType::Handshake)
                     })?;
                 self.process_new_handshake_message()
-                */
-                unreachable!()
             },
+            */
 
             ContentType::Alert => self.common.process_alert(msg),
 
@@ -114,7 +112,7 @@ impl ClientSession {
 
     /*
     fn process_new_handshake_message(&mut self) -> Result<(), TLSError> {
-        while let Some(msg) = self.handshake_joiner.frames.pop_front() {
+        while let Some(msg) = self.common.handshake_joiner.frames.pop_front() {
             self.process_main_protocol(msg)?
         }
         Ok(())
@@ -152,6 +150,7 @@ fn start_handshake(session: &mut ClientSession) -> NextState {
     };
 
     hs.add_message(&ch);
+    trace!("Sent client hello, waiting for server hello");
     session.send_msg(ch);
 
     let next = ExpectServerHello { details: hs };
@@ -173,6 +172,7 @@ impl State for ExpectServerHello {
         -> NextStateOrError
     {
         if let Handshake::ServerHello(_) = extract_handshake(&msg)? {
+            trace!("Got server hello, waiting for server hello done");
             self.details.add_message(&msg);
             Ok(self.into_expect_server_done())
         } else {
@@ -186,8 +186,14 @@ struct ExpectServerDone {
 }
 
 impl ExpectServerDone {
+    /*
     fn into_expect_change_cipher_spec(self) -> Box<ExpectChangeCipherSpec> {
         Box::new(ExpectChangeCipherSpec { details: self.details })
+    }
+    */
+
+    fn into_expect_finished(self) -> Box<ExpectFinished> {
+        Box::new(ExpectFinished { details: self.details })
     }
 
     fn emit_finished(&mut self, session: &mut ClientSession) {
@@ -211,8 +217,9 @@ impl State for ExpectServerDone {
         -> NextStateOrError
     {
         if let Handshake::ServerHelloDone = extract_handshake(&msg)? {
+            trace!("Got server hello done");
             self.details.add_message(&msg);
-            session.common.send_change_cipher_spec();
+            //session.common.send_change_cipher_spec();
 
             let suite = session.common.get_suite();
             let hash_alg = suite.get_hash_alg();
@@ -229,24 +236,24 @@ impl State for ExpectServerDone {
             key_schedule.current_server_traffic_secret = read_key;
             session.common.set_key_schedule(key_schedule);
 
-            session.common.we_now_encrypting();
+            //session.common.we_now_encrypting();
+            //session.common.peer_now_encrypting();
 
+            trace!("Client finished, waiting for server finish");
             self.emit_finished(session);
-            Ok(self.into_expect_change_cipher_spec())
+            Ok(self.into_expect_finished())
         } else {
             Err(TLSError::UnexpectedMessage)
         }
     }
 }
 
+/*
 struct ExpectChangeCipherSpec {
     details: HandshakeDetails,
 }
 
 impl ExpectChangeCipherSpec {
-    fn into_expect_finished(self) -> Box<ExpectFinished> {
-        Box::new(ExpectFinished { details: self.details })
-    }
 }
 
 impl State for ExpectChangeCipherSpec {
@@ -255,7 +262,7 @@ impl State for ExpectChangeCipherSpec {
     {
         if let PlainText { content_type: ContentType::ChangeCipherSpec, fragment } = msg {
             if fragment.is_empty() {
-                session.common.peer_now_encrypting();
+                trace!("Got server ccs, waiting for server finish");
                 Ok(self.into_expect_finished())
             } else {
                 Err(TLSError::CorruptData(ContentType::ChangeCipherSpec))
@@ -265,6 +272,7 @@ impl State for ExpectChangeCipherSpec {
         }
     }
 }
+*/
 
 struct ExpectFinished {
     details: HandshakeDetails,
@@ -294,7 +302,9 @@ impl State for ExpectFinished {
         -> NextStateOrError
     {
         if let Handshake::Finished(hash) = extract_handshake(&msg)? {
+            trace!("Got server finish, checking hash");
             self.check_finish_hash(session, &hash)?;
+            trace!("Hash ok, server finished");
             self.details.add_message(&msg);
             session.common.start_traffic();
             Ok(self.into_expect_traffic())
