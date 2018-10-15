@@ -6,6 +6,10 @@ extern crate log;
 extern crate time;
 extern crate rand;
 extern crate ring;
+extern crate futures;
+#[macro_use]
+extern crate tokio_core;
+extern crate tokio_io;
 
 use std::net::{TcpStream, Shutdown};
 use std::io;
@@ -13,10 +17,10 @@ use std::io::{Read, Write};
 use std::convert::From;
 
 pub mod socks;
-pub mod client;
-pub mod server;
+//pub mod client;
+//pub mod server;
 pub mod utils;
-pub mod protocol;
+//pub mod protocol;
 pub mod security;
 
 #[derive(Debug)]

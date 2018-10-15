@@ -8,3 +8,6 @@ time = "*"
 log = { version = "*", features = ["std"] }
 rand = "*"
 ring = "0.12.0"
+futures = "0.1"
+tokio-core = "0.1"
+tokio-io = "0.1"

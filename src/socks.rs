@@ -1,14 +1,19 @@
-use std::net::{TcpStream, SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs,
-                Shutdown, TcpListener, };
+use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs, Shutdown,};
 use std::vec::Vec;
 use std::convert::From;
-use std::io;
-use std::io::{Read, Write, copy};
+use std::io::{self, Read, Write};
 use std::marker::Send;
-use std::thread;
 use std::str::from_utf8;
+use std::rc::Rc;
+use std::cell::RefCell;
 
-use {Result, Error, DomainName, Port, WriteStream, WriteSize, ReadSize};
+use futures::future;
+use futures::{Future, Poll, Async, Stream};
+use tokio_core::net::{TcpStream, TcpListener};
+use tokio_core::reactor::{Handle, Core};
+use tokio_io::io::{read_exact, write_all};
+
+use {DomainName, Port};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -22,11 +27,19 @@ const METHOD_USER_PASSWORD: u8 = 2;
 const METHOD_NO_ACCP: u8 = 0xFF;
 
 #[derive(Debug)]
+pub enum SocksError {
+    IO(io::Error),
+    InvalidDomainName,
+    Unimplemented,
+    Done,
+}
+
+#[derive(Debug)]
 enum Ver { V4, V5 }
 
-impl From<Ver> for u8 {
-    fn from(ver: Ver) -> u8 {
-        match ver {
+impl<'a> From<&'a Ver> for u8 {
+    fn from(ver: &Ver) -> u8 {
+        match *ver {
             Ver::V4 => SOCKS_V4,
             Ver::V5 => SOCKS_V5,
         }
@@ -42,9 +55,9 @@ enum Method {
     NoAccp,
 }
 
-impl From<Method> for u8 {
-    fn from(m: Method) -> u8 {
-        match m {
+impl<'a> From<&'a Method> for u8 {
+    fn from(m: &Method) -> u8 {
+        match *m {
             Method::NoAuth => METHOD_NO_AUTH,
             Method::GSSAPI => METHOD_GSSAPI,
             Method::UserPassword => METHOD_USER_PASSWORD,
@@ -76,162 +89,212 @@ enum Resp {
     Fail,
 }
 
-pub struct SocksConnection;
+pub struct SocksConnection {
+    buffer: Rc<RefCell<Vec<u8>>>,
+    handle: Handle,
+}
 
 // Open a tcp connection to out bound
 pub trait Connector {
-    fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr>;
+    fn connect(addr: &SocketAddrV4, handle: &Handle)
+        -> Box<Future<Item = TcpStream, Error = SocksError>>;
 
-    fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr> {
-        if let Some(SocketAddr::V4(addr)) = try_parse_domain_name(dn, port) {
-            self.connect(addr)
-        } else {
-            None
+    fn connect_dn(dn: DomainName, port: Port, handle: &Handle)
+        -> Box<Future<Item = TcpStream, Error = SocksError>>
+    {
+        match try_parse_domain_name(dn, port) {
+            Some(SocketAddr::V4(addr)) => Self::connect(&addr, handle),
+            Some(_) => boxup(future::err(SocksError::Unimplemented)),
+            None => boxup(future::err(SocksError::InvalidDomainName))
         }
     }
 }
 
 // Exchange data with a TcpStream. Close the stream when copying finished.
 pub trait CopyTcp {
-    fn copy_tcp(&mut self, stream: TcpStream) -> Result<()>;
+    fn copy_tcp(&mut self, stream: TcpStream) -> io::Result<()>;
+}
+
+fn boxup<T: Future + 'static>(x: T) -> Box<Future<Item=T::Item, Error=T::Error>> {
+    Box::new(x)
 }
 
 impl SocksConnection {
-    pub fn new<T> (stream: TcpStream, connector: T) -> Result<()>
-        where T: Connector + CopyTcp + Send + 'static
+    pub fn serve<T: Connector>(self, stream: TcpStream)
+        -> Box<Future<Item = (usize, usize), Error = SocksError>>
     {
-        let mut tcp = stream.try_clone().unwrap();
-        let mut connector = connector;
+        let handshaked = start_handshake(stream);
 
-        debug!("handshaking");
-        if let Ok(m) = handshake(&mut tcp) {
-            debug!("handshaking ok");
-            
-            let connect_result = match m {
+        let handle = self.handle.clone();
+        let connected = handshaked.and_then(move |(stream, req)| {
+            match req {
                 Req::Cmd(Ver::V5, Command::Connect, Addr::Ipv4(addr)) => {
-                    debug!("target ip is {:?}", addr);
-                    connector.connect(addr)
+                    T::connect(&addr, &handle)
                 },
 
                 Req::Cmd(Ver::V5, Command::Connect, Addr::DN(dn, port)) => {
-                    debug!("target domain name is {:?}", from_utf8(&dn[..]).unwrap());
-                    connector.connect_dn(dn, port)
+                    T::connect_dn(dn, port, &handle)
                 },
 
                 _ => unreachable!(),
-            };
-   
-            debug!("connected to outbound? {}", connect_result.is_some());
-            match connect_result {
-                Some(SocketAddr::V4(addr)) => {
-                    tcp.write_stream(Resp::Success(SocketAddr::V4(addr)));
-                    connector.copy_tcp(stream)
-                },
-                
-                _ => Ok(tcp.write_stream(Resp::Fail)?),
-            }
-        } else {
-            debug!("handshake failed");
-            tcp.shutdown(Shutdown::Both);
-            Err(Error::HandshakeFailed)
-        }
-    }
-}
-
-type SimpleConnector = Option<TcpStream>;
-
-impl CopyTcp for SimpleConnector {
-    fn copy_tcp(&mut self, stream: TcpStream) -> Result<()> {
-        let outbound = self.take().expect("Not connected!");
-        let mut client_reader = stream.try_clone().unwrap();
-        let mut outbound_writer = outbound.try_clone().unwrap();
-        thread::spawn(move || {
-            copy(&mut client_reader, &mut outbound_writer);
-            let _ = client_reader.shutdown(Shutdown::Read);
-            let _ = outbound_writer.shutdown(Shutdown::Write);
+            }.map(|remote| (stream, remote))
         });
 
-        let mut outbound_reader = outbound;
-        let mut client_writer = stream;
-        copy(&mut outbound_reader, &mut client_writer);
-        let _ = client_writer.shutdown(Shutdown::Write);
-        let _ = outbound_reader.shutdown(Shutdown::Read);
-        Ok(())
+        let buffer = self.buffer.clone();
+        let res = connected.and_then(|(stream, remote)| {
+            match remote.local_addr() {
+                Ok(addr) => {
+                    let resp = Resp::Success(addr);
+                    boxup(response(stream, &resp).and_then(|stream| {
+                        pipe(stream, remote, buffer)
+                    }))
+                },
+                
+                Err(_) => {
+                    let resp = Resp::Fail;
+                    boxup(response(stream, &resp).and_then(|_| {
+                        let dummy: (usize, usize) = (0, 0);
+                        future::ok(dummy)
+                    }))
+                },
+            }
+        });
+        boxup(res)
     }
 }
 
-impl Connector for SimpleConnector {
-    fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
-        if let Ok(stream) = TcpStream::connect(addr) {
-            let s = self.get_or_insert(stream);
-            s.local_addr().ok()
-        } else {
-            None
+fn pipe(a: TcpStream, b: TcpStream, buffer: Rc<RefCell<Vec<u8>>>)
+        -> Box<Future<Item = (usize, usize), Error = SocksError>> {
+    let a = Rc::new(a);
+    let b = Rc::new(b);
+
+    let half1 = Transfer::new(a.clone(), b.clone(), buffer.clone());
+    let half2 = Transfer::new(b, a, buffer);
+    boxup(half1.join(half2).map_err(SocksError::IO))
+}
+
+fn response(stream: TcpStream, resp: &Resp)
+    -> Box<Future<Item = TcpStream, Error = SocksError>>
+{
+    let buf = resp.encode();
+    let res = write_all(stream, buf)
+        .map(|(s, _)| s)
+        .map_err(SocksError::IO);
+    boxup(res)
+}
+
+trait Encode {
+    fn encode(&self) -> Vec<u8>;
+}
+
+impl Encode for Resp {
+    fn encode(&self) -> Vec<u8> {
+        match self {
+            Resp::Select(ver, method) => vec![u8::from(ver), u8::from(method)],
+
+            Resp::Success(SocketAddr::V4(addr)) => {
+                let [a, b, c, d] = addr.ip().octets();
+                let port_high = (addr.port() >> 8) as u8;
+                let port_low = addr.port() as u8;
+                vec![SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d, port_high, port_low]
+            },
+
+            Resp::Fail => vec![SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0],
+
+            _ => unreachable!("unexpected Resp message"),
         }
     }
 }
 
-fn handshake<T: ReadSize + WriteStream<Resp>>(tcp: &mut T) -> Result<Req> {
-    let req = get_methods(tcp)?;
+fn start_handshake(stream: TcpStream)
+        -> Box<Future<Item=(TcpStream, Req), Error=SocksError>> {
+    let got = get_methods(stream);
 
-    match req {
-        Req::Methods(Ver::V5, methods) => {
-            let method = select_method(&methods);
-            let resp = Resp::Select(Ver::V5, method);
-            tcp.write_stream(resp)?;
+    let resp = got.and_then(|(stream, req)| {
+        match req {
+            Req::Methods(Ver::V5, methods) => {
+                let method = select_method(&methods);
+                let resp = Resp::Select(Ver::V5, method);
+                boxup(response(stream, &resp).and_then(move |stream| {
+                    if method == Method::NoAccp {
+                        Err(SocksError::Done)
+                    } else {
+                        Ok(stream)
+                    }
+                }))
+            },
 
-            if method == Method::NoAccp {
-                return Err(Error::SocksRequest);
-            }
-        },
-
-        _ => return Err(Error::SocksRequest),
-    }
-    get_command(tcp)
+            _ => boxup(future::err(SocksError::Unimplemented)),
+        }
+    });
+    boxup(resp.and_then(|stream| get_command(stream)))
 }
 
+fn get_methods(stream: TcpStream)
+    -> Box<Future<Item=(TcpStream, Req), Error=SocksError>>
+{
+    let req = read_exact(stream, [0u8]).map_err(SocksError::IO)
+        .and_then(|(stream, buf)| {
+        match buf[0] {
+            SOCKS_V5 => {
+                boxup(read_exact(stream, [0u8]).and_then(|(stream, num_methods)| {
+                    read_exact(stream, vec![0u8; num_methods[0] as usize])
+                }).and_then(|(stream, buf)| {
+                    let methods = buf.iter().map(|x| parse_method(*x)).collect();
+                    future::ok((stream, Req::Methods(Ver::V5, methods)))
+                }).map_err(SocksError::IO))
+            },
 
-fn get_methods<T: ReadSize>(tcp: &mut T) -> Result<Req> {
-    let version = tcp.read_u8()?;
-    let version = parse_version(version)?;
-    let nmethods = tcp.read_u8()?;
-    let methods = tcp.read_size(nmethods as usize)?;
-    let methods = methods.iter().map(|x| parse_method(*x)).collect();
-    Ok(Req::Methods(version, methods))
+            _ => boxup(future::err(SocksError::Unimplemented)),
+        }
+    });
+    boxup(req)
 }
 
-fn get_command<T: ReadSize>(tcp: &mut T) -> Result<Req> {
-    let mut buf = [0u8; 4];
-    tcp.read_exact(&mut buf)?;
+fn get_command(stream: TcpStream)
+    -> Box<Future<Item=(TcpStream, Req), Error=SocksError>>
+{
+    let req = read_exact(stream, [0u8; 4]).map_err(SocksError::IO)
+        .and_then(|(stream, buf)| {
+        match buf {
+            [SOCKS_V5, CMD_CONNECT, RSV, atype] => {
+                boxup(get_addr(stream, atype).and_then(|(stream, addr)| {
+                    Ok((stream, Req::Cmd(Ver::V5, Command::Connect, addr)))
+                }))
+            },
 
-    match buf {
-        [SOCKS_V5, CMD_CONNECT, RSV, atype] => {
-            let addr = get_addr(tcp, atype)?;
-            Ok(Req::Cmd(Ver::V5, Command::Connect, addr))
-        },
-
-        _ => Err(Error::SocksRequest),
-    }
+            _ => boxup(future::err(SocksError::Unimplemented)),
+        }
+    });
+    boxup(req)
 }
 
-fn get_addr<T: ReadSize>(tcp: &mut T, atype: u8) -> Result<Addr> {
+fn get_addr(stream: TcpStream, atype: u8) 
+    -> Box<Future<Item=(TcpStream, Addr), Error=SocksError>>
+{
     match atype {
         ATYP_IP_V4 => {
-            let mut buf = [0u8; 4];
-            tcp.read_exact(&mut buf)?;
-            let port = tcp.read_u16()?;
-            let [a, b, c, d] = buf;
-            Ok(Addr::Ipv4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port)))
+            boxup(read_exact(stream, [0u8; 6]).and_then(|(stream, buf)| {
+                let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                let port = ((buf[4] as u16) << 8) | buf[5] as u16;
+                let addr = SocketAddrV4::new(addr, port);
+                Ok((stream, Addr::Ipv4(addr)))
+            }).map_err(SocksError::IO))
         },
 
         ATYP_DOMAINNAME => {
-            let len = tcp.read_u8()?;
-            let domain_name = tcp.read_size(len as usize)?;
-            let port = tcp.read_u16()?;
-            Ok(Addr::DN(domain_name, port))
+            boxup(read_exact(stream, [0u8]).and_then(|(stream, len)| {
+                read_exact(stream, vec![0u8; len[0] as usize + 2])
+            }).and_then(|(stream, name_port)| {
+                let len = name_port.len() - 2;
+                let mut domain_name = Vec::new();
+                domain_name.extend_from_slice(&name_port[..len]);
+                let port = ((name_port[len] as u16) << 8) | name_port[len + 1] as u16;
+                Ok((stream, Addr::DN(domain_name, port)))
+            }).map_err(SocksError::IO))
         },
 
-        _ => Err(Error::SocksRequest),
+        _ => boxup(future::err(SocksError::Unimplemented)),
     }
 }
 
@@ -245,12 +308,12 @@ fn select_method(methods: &Vec<Method>) -> Method {
     }
 }
 
-fn parse_version(x: u8) -> Result<Ver> {
-    match x {
-        SOCKS_V5 => Ok(Ver::V5),
-        _        => Err(Error::SocksVersion),
-    }
-}
+//fn parse_version(x: u8) -> Option<Ver> {
+//    match x {
+//        SOCKS_V5 => Some(Ver::V5),
+//        _        => None,
+//    }
+//}
 
 fn parse_method(x: u8) -> Method {
     match x {
@@ -262,50 +325,102 @@ fn parse_method(x: u8) -> Method {
     }
 }
 
-impl WriteStream<Resp> for TcpStream {
-    fn write_stream(&mut self, resp: Resp) -> io::Result<()> {
-        match resp {
-            Resp::Select(ver, method) => {
-                debug!("select vesion is {:?}, method is {:?}", ver, method);
-                self.write_all(&[u8::from(ver), u8::from(method)])
-            },
-
-            Resp::Success(SocketAddr::V4(addr)) => {
-                let [a, b, c, d] = addr.ip().octets();
-                let port = addr.port();
-                debug!("remote address {}.{}.{}.{}, port {}", a, b, c, d, port);
-                self.write_all(&[SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d])?;
-                self.write_u16(port)
-            },
-
-            Resp::Fail => {
-                debug!("failed");
-                self.write_all(&[SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0])
-            },
-
-            _ => unreachable!("unexpected Resp message"),
-        }
-    }
-}
-
 fn try_parse_domain_name(buf: DomainName, port: Port) -> Option<SocketAddr> {
     let string = from_utf8(&buf[..]).unwrap_or("");
     let mut addr = (string, port).to_socket_addrs().unwrap();
     addr.nth(0)
 }
 
+struct Transfer {
+    reader: Rc<TcpStream>,
+    writer: Rc<TcpStream>,
+    buf: Rc<RefCell<Vec<u8>>>,
+    amt: usize,
+}
+
+impl Transfer {
+    fn new(reader: Rc<TcpStream>,
+           writer: Rc<TcpStream>,
+           buf: Rc<RefCell<Vec<u8>>>) -> Transfer {
+        Transfer {
+            reader,
+            writer,
+            buf,
+            amt: 0,
+        }
+    }
+}
+
+impl Future for Transfer {
+    type Item = usize;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<usize, io::Error> {
+        let mut buffer = self.buf.borrow_mut();
+        loop {
+            let read_ready = self.reader.poll_read().is_ready();
+            let write_ready = self.writer.poll_write().is_ready();
+            if !read_ready || !write_ready {
+                return Ok(Async::NotReady)
+            }
+
+            let n = try_nb!((&*self.reader).read(&mut buffer));
+            if n == 0 {
+                self.writer.shutdown(Shutdown::Write)?;
+                return Ok(self.amt.into())
+            }
+
+            self.amt += n;
+            
+            let m = (&*self.writer).write(&buffer[..n])?;
+            assert_eq!(m, n);
+        }
+    }
+}
+
 pub struct Socks5;
 
 impl Socks5 {
     pub fn bind(listen_addr: &str) {
-        let listening = TcpListener::bind(listen_addr).unwrap();
-        listening.incoming().for_each(|stream| {
-            if let Ok(s) = stream {
-                let mut connector: SimpleConnector = None;
-                thread::spawn(move || {
-                    SocksConnection::new(s, connector);
-                });
-            }
+        let mut lp = Core::new().unwrap();
+        let handle = lp.handle();
+        let buffer = Rc::new(RefCell::new(vec![0u8; 64 * 1024]));
+
+        let addr = listen_addr.parse().unwrap();
+        let listening = TcpListener::bind(&addr, &handle).unwrap();
+        let clients = listening.incoming().map(|(stream, addr)| {
+            (SocksConnection {
+                buffer: buffer.clone(),
+                handle: handle.clone(),
+            }.serve::<SimpleConnector>(stream), addr)
         });
+
+        let handle = lp.handle();
+        let server = clients.for_each(|(client, addr)| {
+            handle.spawn(client.then(move |res| {
+                match res {
+                    Ok((a, b)) => {
+                        println!("proxied {}/{} bytes for {}", a, b, addr);
+                    },
+                    Err(e) => println!("error for {}: {:?}", addr, e),
+                }
+                future::ok(())
+            }));
+            Ok(())
+        });
+
+        lp.run(server).unwrap()
+    }
+}
+
+struct SimpleConnector;
+
+impl Connector for SimpleConnector {
+    fn connect(addr: &SocketAddrV4, handle: &Handle)
+        -> Box<Future<Item = TcpStream, Error = SocksError>>
+    {
+        let stream = TcpStream::connect(&SocketAddr::V4(*addr), handle)
+            .map_err(SocksError::IO);
+        boxup(stream)
     }
 }
