@@ -1,7 +1,6 @@
 use security::AlertDescription;
 use security::codec::Codec;
 
-use rand::thread_rng;
 use ring::{hmac, digest, hkdf};
 
 pub struct KeySchedule {

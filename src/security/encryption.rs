@@ -193,7 +193,7 @@ impl MsgDecryptor for TLS13MessageDecrypter {
 #[cfg(test)]
 mod test {
     use std::vec::Vec;
-    use rand::{Rng, thread_rng};
+    use security::rand;
     use security::{PlainText, ContentType};
     use security::codec::Codec;
     use super::{MsgEncryptor, MsgDecryptor};
@@ -207,7 +207,7 @@ mod test {
 
         for i in 0..5 {
             let mut buf = [0u8; 100];
-            thread_rng().fill_bytes(&mut buf);
+            rand::fill_random(&mut buf);
             let msg = PlainText {
                 content_type: ContentType::ApplicationData,
                 fragment: buf.to_vec(),
@@ -229,7 +229,7 @@ mod test {
 
         for i in 0..5 {
             let mut buf = [0u8; 100];
-            thread_rng().fill_bytes(&mut buf);
+            rand::fill_random(&mut buf);
             let msg = PlainText {
                 content_type: ContentType::ApplicationData,
                 fragment: buf.to_vec(),

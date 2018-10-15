@@ -1,10 +1,10 @@
 use super::{Session, SecureStream};
 use super::client::ClientSession;
 use super::server::ServerSession;
+use super::rand;
 use std::net::{TcpStream, TcpListener, Shutdown};
 use std::io::{Read, Write};
 use std::thread;
-use rand::{Rng, thread_rng};
 
 use log::{self, Record, Metadata, Level, SetLoggerError};
 
@@ -37,7 +37,7 @@ fn test_secure_stream() {
     thread::spawn(move || run_server(port));
     for i in 0..5 {
         let mut req = vec![0u8; 100];
-        thread_rng().fill_bytes(&mut req[..]);
+        rand::fill_random(&mut req[..]);
         let resp = run_client(port, &req);
         assert_eq!(req, resp)
     }

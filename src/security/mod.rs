@@ -7,8 +7,6 @@ use std::marker::PhantomData;
 use std::fmt;
 use std::error::Error;
 
-use rand::{Rng, thread_rng};
-
 #[macro_use]
 mod macros;
 
@@ -19,6 +17,7 @@ pub mod codec;
 pub mod handshake;
 pub mod key_schedule;
 pub mod suites;
+pub mod rand;
 
 #[cfg(test)]
 mod test;

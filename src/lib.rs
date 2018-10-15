@@ -4,7 +4,6 @@
 #[macro_use]
 extern crate log;
 extern crate time;
-extern crate rand;
 extern crate ring;
 extern crate futures;
 #[macro_use]
