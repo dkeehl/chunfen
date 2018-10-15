@@ -5,8 +5,7 @@ use security::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,}
 use security::key_schedule::{SecretKind, KeySchedule,};
 use security::encryption::{MsgEncryptor, MsgDecryptor,};
 use security::codec::Codec;
-
-use rand::{Rng, thread_rng};
+use security::rand;
 use ring::constant_time;
 
 pub struct ServerSession {
@@ -122,7 +121,7 @@ impl ExpectClientHello {
     fn emit_server_hello(&mut self, session: &mut ServerSession) {
         // the server random
         let mut random = [0u8; 32];
-        thread_rng().fill_bytes(&mut random);
+        rand::fill_random(&mut random);
 
         let mut fragment = Vec::new();
         Handshake::server_hello(random).encode(&mut fragment);

@@ -6,5 +6,4 @@ authors = ["Thomas Lin <dkeehl@gmail.com>"]
 [dependencies]
 time = "*"
 log = { version = "*", features = ["std"] }
-rand = "*"
 ring = "0.12.0"

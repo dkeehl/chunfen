@@ -6,8 +6,8 @@ use security::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,}
 use security::key_schedule::{SecretKind, KeySchedule,};
 use security::encryption::{MsgEncryptor, MsgDecryptor,};
 use security::codec::Codec;
+use security::rand;
 
-use rand::{Rng, thread_rng};
 use ring::constant_time;
 
 pub struct ClientSession {
@@ -127,7 +127,7 @@ fn start_handshake(session: &mut ClientSession) -> NextState {
 
     // The client random
     let mut random = [0u8; 32];
-    thread_rng().fill_bytes(&mut random);
+    rand::fill_random(&mut random);
 
     // handshake, client hello
     let mut fragment = Vec::new();
