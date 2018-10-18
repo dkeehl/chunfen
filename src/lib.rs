@@ -9,74 +9,33 @@ extern crate futures;
 #[macro_use]
 extern crate tokio_core;
 extern crate tokio_io;
+extern crate bytes;
+#[macro_use]
+extern crate nom;
 
-use std::net::{TcpStream, Shutdown};
-use std::io;
-use std::io::{Read, Write};
-use std::convert::From;
+use std::net::TcpStream;
+use std::io::{self, Read, Write};
+use bytes::BytesMut;
 
 pub mod socks;
 //pub mod client;
 //pub mod server;
 pub mod utils;
-//pub mod protocol;
-pub mod security;
-
-#[derive(Debug)]
-pub enum Error {
-    //socks errors
-    SocksVersion,
-    SocksState,
-    SocksRequest,
-    SocksDisconnected,
-    HandshakeFailed,
-
-    Io,
-
-    //client errors
-    ServerClosedConnection,
-}
-
-impl From<io::Error> for Error {
-    fn from(_: io::Error) -> Error { Error::Io }
-}
-
-type Result<T> = ::std::result::Result<T, Error>;
+pub mod protocol;
+//pub mod security;
 
 type Id = u32;
 
-type PortIp = Vec<u8>;
-
-type DomainName = Vec<u8>;
+type DomainName = BytesMut;
 
 type Port = u16;
 
-trait Stream {
-    fn shutdown(&mut self) -> io::Result<()>;
-    fn shutdown_read(&mut self) -> io::Result<()>;
-    fn shutdown_write(&mut self) -> io::Result<()>;
-}
-
-trait WriteStream<T>: Stream {
+trait WriteStream<T> {
     fn write_stream(&mut self, msg: T) -> io::Result<()>;
 }
 
-trait ParseStream<T>: Stream {
+trait ParseStream<T> {
     fn parse_stream(&mut self) -> Option<T>;
-}
-
-impl Stream for TcpStream {
-    fn shutdown(&mut self) -> io::Result<()> { 
-        TcpStream::shutdown(self, Shutdown::Both)
-    }
-
-    fn shutdown_read(&mut self) -> io::Result<()> {
-        TcpStream::shutdown(self, Shutdown::Read)
-    }
-
-    fn shutdown_write(&mut self) -> io::Result<()> {
-        TcpStream::shutdown(self, Shutdown::Write)
-    }
 }
 
 trait ReadSize: Read {
@@ -131,3 +90,7 @@ trait WriteSize: Write {
 impl ReadSize for TcpStream {}
 
 impl WriteSize for TcpStream {}
+
+trait Encode {
+    fn encode(&self) -> BytesMut;
+}

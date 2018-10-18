@@ -13,8 +13,9 @@ use tokio_core::net::{TcpStream, TcpListener};
 use tokio_core::reactor::{Handle, Core};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::io::{copy, read_exact, write_all,};
+use bytes::{BytesMut, BufMut};
 
-use {DomainName, Port};
+use {Encode, DomainName, Port};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -189,26 +190,25 @@ fn response(stream: TcpStream, resp: &Resp)
     boxup(res)
 }
 
-trait Encode {
-    fn encode(&self) -> Vec<u8>;
-}
-
 impl Encode for Resp {
-    fn encode(&self) -> Vec<u8> {
+    fn encode(&self) -> BytesMut {
+        let mut buf = BytesMut::new();
         match self {
-            Resp::Select(ver, method) => vec![u8::from(ver), u8::from(method)],
+            Resp::Select(ver, method) => 
+                buf.put_slice(&[u8::from(ver), u8::from(method)][..]),
 
             Resp::Success(SocketAddr::V4(addr)) => {
                 let [a, b, c, d] = addr.ip().octets();
-                let port_high = (addr.port() >> 8) as u8;
-                let port_low = addr.port() as u8;
-                vec![SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d, port_high, port_low]
+                buf.put_slice(&[SOCKS_V5, 0, RSV, ATYP_IP_V4, a, b, c, d][..]);
+                buf.put_u16_be(addr.port());
             },
 
-            Resp::Fail => vec![SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0],
+            Resp::Fail =>
+                buf.put_slice(&[SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0][..]),
 
             _ => unreachable!("unexpected Resp message"),
-        }
+        };
+        buf
     }
 }
 
@@ -294,7 +294,7 @@ fn get_addr(stream: TcpStream, atype: u8)
                 read_exact(stream, vec![0u8; len[0] as usize + 2])
             }).and_then(|(stream, name_port)| {
                 let len = name_port.len() - 2;
-                let mut domain_name = Vec::new();
+                let mut domain_name = BytesMut::new();
                 domain_name.extend_from_slice(&name_port[..len]);
                 let port = ((name_port[len] as u16) << 8) | name_port[len + 1] as u16;
                 Ok((stream, Addr::DN(domain_name, port)))
