@@ -5,6 +5,7 @@
 extern crate log;
 extern crate time;
 extern crate ring;
+#[macro_use]
 extern crate futures;
 #[macro_use]
 extern crate tokio_core;
@@ -15,10 +16,11 @@ extern crate nom;
 
 use std::net::TcpStream;
 use std::io::{self, Read, Write};
-use bytes::BytesMut;
+use bytes::{BytesMut, Bytes};
 
 pub mod socks;
-//pub mod client;
+pub mod tunnel_port;
+pub mod client;
 //pub mod server;
 pub mod utils;
 pub mod protocol;
@@ -26,7 +28,7 @@ pub mod protocol;
 
 type Id = u32;
 
-type DomainName = BytesMut;
+type DomainName = Bytes;
 
 type Port = u16;
 
@@ -92,5 +94,5 @@ impl ReadSize for TcpStream {}
 impl WriteSize for TcpStream {}
 
 trait Encode {
-    fn encode(&self) -> BytesMut;
+    fn encode(&self, dest: &mut BytesMut);
 }

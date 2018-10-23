@@ -2,7 +2,7 @@ use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs, Shutdown,};
 use std::vec::Vec;
 use std::convert::From;
 use std::io::{self, Read, Write};
-use std::marker::Send;
+use std::marker::{Sized, Send};
 use std::str::from_utf8;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -13,9 +13,10 @@ use tokio_core::net::{TcpStream, TcpListener};
 use tokio_core::reactor::{Handle, Core};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::io::{copy, read_exact, write_all,};
-use bytes::{BytesMut, BufMut};
+use bytes::{Bytes, BytesMut, BufMut};
 
 use {Encode, DomainName, Port};
+use utils::not_connected;
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -31,7 +32,6 @@ const METHOD_NO_ACCP: u8 = 0xFF;
 #[derive(Debug)]
 pub enum SocksError {
     IO(io::Error),
-    InvalidDomainName,
     Unimplemented,
     Done,
 }
@@ -92,39 +92,37 @@ enum Resp {
 }
 
 pub struct SocksConnection {
-    buffer: Rc<RefCell<Vec<u8>>>,
+    //buffer: Rc<RefCell<Vec<u8>>>,
     handle: Handle,
 }
 
 // Open a tcp connection to out bound
-pub trait Connector {
-    type IO: AsyncRead + AsyncWrite + 'static;
+pub trait Connector: AsyncRead + AsyncWrite + 'static + Sized {
+    fn connect(self, addr: &SocketAddrV4, handle: &Handle)
+        -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>;
 
-    fn connect(addr: &SocketAddrV4, handle: &Handle)
-        -> Box<Future<Item = Option<(Self::IO, SocketAddr)>, Error = SocksError>>;
-
-    fn connect_dn(dn: DomainName, port: Port, handle: &Handle)
-        -> Box<Future<Item = Option<(Self::IO, SocketAddr)>, Error = SocksError>>
+    fn connect_dn(self, dn: DomainName, port: Port, handle: &Handle)
+        -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
         match try_parse_domain_name(dn, port) {
-            Some(SocketAddr::V4(addr)) => Box::new(Self::connect(&addr, handle)),
-            Some(_) => Box::new(future::err(SocksError::Unimplemented)),
-            None => Box::new(future::err(SocksError::InvalidDomainName))
+            Some(SocketAddr::V4(addr)) => Box::new(self.connect(&addr, handle)),
+            Some(_) => unimplemented!(),
+            None => Box::new(future::err(
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid domain name")))
         }
     }
 }
-
-// Exchange data with a TcpStream. Close the stream when copying finished.
-//pub trait CopyTcp {
-//    fn copy_tcp(&mut self, stream: TcpStream) -> io::Result<()>;
-//}
 
 fn boxup<T: Future + 'static>(x: T) -> Box<Future<Item=T::Item, Error=T::Error>> {
     Box::new(x)
 }
 
 impl SocksConnection {
-    pub fn serve<T: Connector>(self, stream: TcpStream)
+    pub fn new(handle: Handle) -> Self {
+        SocksConnection { handle }
+    }
+
+    pub fn serve<T: Connector>(self, stream: TcpStream, connector: T)
         -> Box<Future<Item = (usize, usize), Error = SocksError>>
     {
         let handshaked = start_handshake(stream);
@@ -133,15 +131,15 @@ impl SocksConnection {
         let connected = handshaked.and_then(move |(stream, req)| {
             match req {
                 Req::Cmd(Ver::V5, Command::Connect, Addr::Ipv4(addr)) => {
-                    T::connect(&addr, &handle)
+                    connector.connect(&addr, &handle)
                 },
 
                 Req::Cmd(Ver::V5, Command::Connect, Addr::DN(dn, port)) => {
-                    T::connect_dn(dn, port, &handle)
+                    connector.connect_dn(dn, port, &handle)
                 },
 
                 _ => unreachable!(),
-            }.map(|conn| (stream, conn))
+            }.map(|conn| (stream, conn)).map_err(SocksError::IO)
         });
 
         let res = connected.and_then(|(stream, conn)| {
@@ -183,7 +181,8 @@ fn pipe<T, S>(a: T, b: S) -> Box<Future<Item = (usize, usize), Error = SocksErro
 fn response(stream: TcpStream, resp: &Resp)
     -> Box<Future<Item = TcpStream, Error = SocksError>>
 {
-    let buf = resp.encode();
+    let mut buf = BytesMut::new();
+    resp.encode(&mut buf);
     let res = write_all(stream, buf)
         .map(|(s, _)| s)
         .map_err(SocksError::IO);
@@ -191,8 +190,7 @@ fn response(stream: TcpStream, resp: &Resp)
 }
 
 impl Encode for Resp {
-    fn encode(&self) -> BytesMut {
-        let mut buf = BytesMut::new();
+    fn encode(&self, buf: &mut BytesMut) {
         match self {
             Resp::Select(ver, method) => 
                 buf.put_slice(&[u8::from(ver), u8::from(method)][..]),
@@ -207,8 +205,7 @@ impl Encode for Resp {
                 buf.put_slice(&[SOCKS_V5, 1, RSV, ATYP_IP_V4, 0, 0, 0, 0, 0, 0][..]),
 
             _ => unreachable!("unexpected Resp message"),
-        };
-        buf
+        }
     }
 }
 
@@ -294,8 +291,7 @@ fn get_addr(stream: TcpStream, atype: u8)
                 read_exact(stream, vec![0u8; len[0] as usize + 2])
             }).and_then(|(stream, name_port)| {
                 let len = name_port.len() - 2;
-                let mut domain_name = BytesMut::new();
-                domain_name.extend_from_slice(&name_port[..len]);
+                let domain_name = Bytes::from(&name_port[..len]);
                 let port = ((name_port[len] as u16) << 8) | name_port[len + 1] as u16;
                 Ok((stream, Addr::DN(domain_name, port)))
             }).map_err(SocksError::IO))
@@ -337,15 +333,15 @@ impl Socks5 {
     pub fn bind(listen_addr: &str) {
         let mut lp = Core::new().unwrap();
         let handle = lp.handle();
-        let buffer = Rc::new(RefCell::new(vec![0u8; 64 * 1024]));
+        //let buffer = Rc::new(RefCell::new(vec![0u8; 64 * 1024]));
 
         let addr = listen_addr.parse().unwrap();
         let listening = TcpListener::bind(&addr, &handle).unwrap();
         let clients = listening.incoming().map(|(stream, addr)| {
             (SocksConnection {
-                buffer: buffer.clone(),
+                //buffer: buffer.clone(),
                 handle: handle.clone(),
-            }.serve::<SimpleConnector>(stream), addr)
+            }.serve(stream, SimpleConnector(None)), addr)
         });
 
         let handle = lp.handle();
@@ -366,19 +362,53 @@ impl Socks5 {
     }
 }
 
-struct SimpleConnector;
+struct SimpleConnector(Option<TcpStream>);
+
+impl Read for SimpleConnector {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.0 {
+            Some(ref mut rd) => rd.read(buf),
+            None => Err(not_connected()),
+        }
+    }
+}
+
+impl AsyncRead for SimpleConnector {}
+
+impl Write for SimpleConnector {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.0 {
+            Some(ref mut wt) => wt.write(buf),
+            None => Err(not_connected()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.0 {
+            Some(ref mut wt) => wt.flush(),
+            None => Err(not_connected()),
+        }
+    }
+}
+
+impl AsyncWrite for SimpleConnector {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        match self.0 {
+            Some(ref mut wt) => AsyncWrite::shutdown(wt),
+            None => Err(not_connected()),
+        }
+    }
+}
 
 impl Connector for SimpleConnector {
-    type IO = TcpStream;
 
-    fn connect(addr: &SocketAddrV4, handle: &Handle)
-        -> Box<Future<Item = Option<(TcpStream, SocketAddr)>, Error = SocksError>>
+    fn connect(self, addr: &SocketAddrV4, handle: &Handle)
+        -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
         let stream = TcpStream::connect(&SocketAddr::V4(*addr), handle)
-            .map_err(SocksError::IO)
             .map(|tcp| {
                 let addr = tcp.local_addr().unwrap();
-                Some((tcp, addr))
+                Some((SimpleConnector(Some(tcp)), addr))
             }).or_else(|e| {
                 future::ok(None)
             });

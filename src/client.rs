@@ -1,45 +1,34 @@
-use std::net::{TcpStream, TcpListener, SocketAddr, SocketAddrV4, Shutdown,
-               ToSocketAddrs};
+use std::net::{self, SocketAddr, SocketAddrV4, Shutdown, ToSocketAddrs};
 use std::thread;
-use std::sync::mpsc;
-use std::sync::mpsc::{Sender, Receiver,  SyncSender, TryRecvError, };
-use std::io;
-use std::io::{copy, Write};
+use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
+use std::io::{self, Write, Read};
 use std::collections::HashMap;
-use std::str::from_utf8;
 
-use time::get_time;
+use time::{Timespec, get_time};
+use tokio_core::reactor::{Core, Handle};
+use tokio_core::net::{TcpStream, TcpListener};
+use tokio_io::{AsyncRead, AsyncWrite};
+use futures::future;
+use futures::{Stream, Future, Poll, Async};
+use futures::sync::mpsc::UnboundedSender;
+use bytes::{BufMut, BytesMut};
+use nom::Err::Incomplete;
 
-use {DomainName, Port, Id, Result, 
-    WriteSize, ReadSize, WriteStream, Error, ParseStream};
-use socks::{SocksConnection, Connector, CopyTcp};
-use utils::Timer;
-use protocol::*;
-use protocol::{ServerMsg, ClientMsg};
+use {Encode, DomainName, Port, Id};
+use socks::SocksConnection;
+use utils::{self, Timer};
+use tunnel_port::{ToPort, FromPort, TunnelPort};
+use protocol::{parse_client_msg, parse_server_msg, ServerMsg, ClientMsg,
+               HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 
-#[derive(Debug)]
-enum SocksMsg {
-    ConnectOK(Vec<u8>),
-    Data(Vec<u8>),
-    ShutdownWrite,
-    Close,
-}
-
-enum Msg {
-    NewPort(Id, SyncSender<SocksMsg>),
-    Server(ServerMsg),
-    Client(ClientMsg),
-    Shutdown,
-}
-
-struct PortMap(HashMap<Id, SyncSender<SocksMsg>>);
+struct PortMap(HashMap<Id, UnboundedSender<ToPort>>);
 
 impl PortMap {
     fn new() -> PortMap {
         PortMap(HashMap::new())
     }
 
-    fn insert(&mut self, id: Id, sender: SyncSender<SocksMsg>) {
+    fn insert(&mut self, id: Id, sender: UnboundedSender<ToPort>) {
         self.0.insert(id, sender);
     }
 
@@ -47,228 +36,239 @@ impl PortMap {
         self.0.remove(&id);
     }
 
-    fn send(&mut self, id: Id, msg: SocksMsg) {
-        self.0.get(&id).map(|v| v.send(msg));
+    fn send(&mut self, id: Id, msg: ToPort) {
+        self.0.get(&id).map(|v| {
+            v.unbounded_send(msg).expect("failed to send message to port")
+        });
     }
 }
 
 struct Tunnel {
     // This sender rarely sends messages itself, but is used to be cloned to
     // produce tunnel ports.
-    sender: Sender<Msg>,
+    // If this sender get an error when sending messages, we know that the
+    // tunnel is broken.
+    sender: Sender<FromPort>,
     count: u32,
-}
-
-// To implement the Write trait, need this wrapper for Sender
-struct MsgSender(Id, Sender<Msg>);
-
-struct TunnelPort {
-    id: Id,
-    sender: Sender<Msg>,
-    receiver: Receiver<SocksMsg>,
-    //alive_time: Timespec, // For profiling 
 }
 
 impl Tunnel {
     pub fn new(server: &str) -> Tunnel {
-        // Crash if connection failed
-        let stream = TcpStream::connect(server).unwrap();
-
-        let tcp = stream.try_clone().unwrap();
+        //let addr: SocketAddr = server.parse().unwrap();
+        let stream = net::TcpStream::connect(server).unwrap();
         let (sender, receiver) = mpsc::channel();
-
-        // A tunnel has two threads. One is `monitor`, which maintains the
-        // the connection with the tunnel server, reads from the server and
-        // sends to the handler. The other is `handler`, which receives and
-        // handles messages from the monitor and all the ports.
         let cloned_sender = sender.clone();
         thread::spawn(move || {
-            monitor(stream, cloned_sender);
-        });
-
-        thread::spawn(move || {
-            handler(tcp, receiver);
+            run_tunnel(stream, cloned_sender, receiver)
         });
 
         Tunnel { sender, count: 0, }
     }
 
-    pub fn connect(&mut self) -> Result<TunnelPort> {
+    pub fn connect(&mut self) -> TunnelPort {
         let id = self.count;
-        // Open a channel between the port and the tunnel. The sender is left,
-        // while the receiver is put in the port.
-        let (sender, receiver) = mpsc::sync_channel(1000);
-        self.sender.send(Msg::NewPort(id, sender));
+        // Open a channel between the port and the tunnel. The sender is send 
+        // to the tunnel, for sending data later to the corresponing port. 
+        let (sender, port) = TunnelPort::new(id, self.sender.clone());
+        self.sender.send(FromPort::NewPort(id, sender));
         self.count += 1;
-        Ok(TunnelPort { id, sender: self.sender.clone() , receiver })
+        port
+    }
+
+    fn run(stream: TcpStream,
+           sender: Sender<FromPort>,
+           receiver: Receiver<FromPort>,
+           handle: Handle) -> RunTunnel
+    {
+        let server = Server::new(stream);
+        let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64, &handle);
+        let ports = PortMap::new();
+        let alive_time = get_time();
+        RunTunnel {
+            server,
+            timer,
+            client: receiver,
+            ports,
+            alive_time,
+        }
     }
 }
 
-
-fn monitor<T: ParseStream<ServerMsg>>(mut tcp: T, handler: Sender<Msg>) {
-    let mut alive_time = get_time();
-    let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64);
-    loop {
-        match timer.try_recv() {
-            Ok(_) => {
-                let duration = get_time() - alive_time;
-                if duration.num_milliseconds() > ALIVE_TIMEOUT_TIME_MS {
-                    break;
-                } else {
-                    handler.send(Msg::Client(ClientMsg::HeartBeat));
-                }
-            },
-
-            Err(TryRecvError::Empty) => {},
-
-            _ => break,
-        }
-
-        match tcp.parse_stream() {
-            Some(msg) => {
-                handler.send(Msg::Server(msg));
-                alive_time = get_time();
-            },
-
-            None => {
-                println!("Lost connection to server");
-                break
-            },
-        }
-    }
-    let _ = tcp.shutdown_read();
-    let _ = handler.send(Msg::Shutdown);
+fn run_tunnel(stream: net::TcpStream, sender: Sender<FromPort>, receiver: Receiver<FromPort>) {
+    let mut lp = Core::new().unwrap();
+    let handle = lp.handle();
+    let mut stream = TcpStream::from_stream(stream, &handle).unwrap();
+    let tunnel = Tunnel::run(stream, sender, receiver, handle);
+    lp.run(tunnel).unwrap()
 }
 
-fn handler<T: WriteStream<ClientMsg>>(tcp: T, receiver: Receiver<Msg>) {
-    let mut tcp = tcp;
-    let mut ports = PortMap::new();
-    loop {
-        if let Ok(msg) = receiver.recv() {
-            match msg {
-                Msg::NewPort(id, sender) => {
-                    ports.insert(id, sender);
-                    tcp.write_stream(ClientMsg::OpenPort(id));
-                }
-                             
-                Msg::Server(s_msg) => {
-                    match s_msg {
-                        ServerMsg::HeartBeatRsp => {},
+struct RunTunnel {
+    server: Server,
+    timer: Timer,
+    client: Receiver<FromPort>,
 
-                        ServerMsg::ConnectOK(id, buf) => 
-                            ports.send(id, SocksMsg::ConnectOK(buf)),
+    ports: PortMap,
+    alive_time: Timespec,
+}
 
-                        ServerMsg::Data(id, buf) =>
-                            ports.send(id, SocksMsg::Data(buf)),
+impl RunTunnel {
+    fn process_server_msg(&mut self, s_msg: ServerMsg) {
+        println!("get server message: {}", s_msg);
+        match s_msg {
+            ServerMsg::HeartBeatRsp => {},
 
-                        ServerMsg::ShutdownWrite(id) =>
-                            ports.send(id, SocksMsg::ShutdownWrite),
+            ServerMsg::ConnectOK(id, buf) => 
+                self.ports.send(id, ToPort::ConnectOK(buf)),
 
-                        ServerMsg::ClosePort(id) =>
-                            ports.send(id, SocksMsg::Close),
-                    }
-                },
-                Msg::Client(c_msg) => {
-                    match c_msg {
-                        ClientMsg::OpenPort(_) => unreachable!(),
+            ServerMsg::Data(id, buf) =>
+                self.ports.send(id, ToPort::Data(buf)),
 
-                        ClientMsg::ClosePort(id) => ports.remove(id),
-                        
-                        _ => {},
-                    }
-                    tcp.write_stream(c_msg);
-                },
+            ServerMsg::ShutdownWrite(id) =>
+                self.ports.send(id, ToPort::ShutdownWrite),
 
-                Msg::Shutdown => break,
+            ServerMsg::ClosePort(id) =>
+                self.ports.send(id, ToPort::Close),
+        }
+        self.alive_time = get_time();
+    }
+
+    fn process_client_msg(&mut self, c_msg: ClientMsg) {
+        //println!("get client message {:?}", c_msg);
+        match c_msg {
+            ClientMsg::OpenPort(_) => unreachable!(),
+
+            ClientMsg::ClosePort(id) => self.ports.remove(id),
+            
+            _ => {},
+        }
+        self.server.buffer_msg(c_msg);
+    }
+}
+
+impl Future for RunTunnel {
+    type Item = ();
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<(), io::Error> {
+        if let Async::Ready(_) = self.timer.poll()? {
+            let dur = get_time() - self.alive_time;
+            if dur.num_milliseconds() > ALIVE_TIMEOUT_TIME_MS {
+                // Server timeout.
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "timeout"))
+            } else {
+                self.server.buffer_msg(ClientMsg::HeartBeat);
             }
-        } else {
-            break
         }
-    }
-    let _ = tcp.shutdown_write();
-}
 
-impl Connector for TunnelPort {
-    fn connect(&mut self, addr: SocketAddrV4) -> Option<SocketAddr> {
-        debug!("task {}: connecting to {}", self.id, addr);
-        let mut buf = Vec::new();
-        let _ = write!(&mut buf, "{}", addr);
-        self.sender.send(Msg::Client(ClientMsg::Connect(self.id, buf)));
-        if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
-            try_parse_domain_name(buf)
-        } else {
-            None
-        }
-    }
-
-    fn connect_dn(&mut self, dn: DomainName, port: Port) -> Option<SocketAddr> {
-        self.sender.send(Msg::Client(ClientMsg::ConnectDN(self.id, dn, port)));
-        if let Ok(SocksMsg::ConnectOK(buf)) = self.receiver.recv() {
-            try_parse_domain_name(buf)
-        } else {
-            None
-        }
-    }
-}
-
-fn try_parse_domain_name(buf: Vec<u8>) -> Option<SocketAddr> {
-    let string = from_utf8(&buf[..]).unwrap_or("");
-    debug!("remote address is {}", &string);
-    string.to_socket_addrs().ok()
-        .and_then(|mut addr_iter| addr_iter.nth(0))
-}
-
-impl Write for MsgSender {
-    fn write(&mut self, buf: &[u8]) -> ::std::io::Result<usize> {
-        let size: usize = 1024;
-        let mut to: Vec<u8> = Vec::with_capacity(size);
-        let len = buf.len();
-        let res = if len > size {
-            to.write(&buf[..size])?
-        } else {
-            to.write(buf)?
-        };
-        self.1.send(Msg::Client(ClientMsg::Data(self.0, to)));
-        Ok(res)
-    }
-
-    fn flush(&mut self) -> ::std::io::Result<()> { Ok(()) }
-}
-
-impl CopyTcp for TunnelPort {
-    fn copy_tcp(&mut self, stream: TcpStream) -> Result<()> {
-        let mut stream_read = stream.try_clone().unwrap();
-        let mut tun_write = MsgSender(self.id, self.sender.clone());
-        thread::spawn(move || {
-            copy(&mut stream_read, &mut tun_write);
-            stream_read.shutdown(Shutdown::Read).unwrap();
-            tun_write.1.send(Msg::Client(ClientMsg::ShutdownWrite(tun_write.0)));
-        });
-
-        let mut stream_write = stream;
+        // Timer is not ready.
+        // Check client messages.
         loop {
-            match self.receiver.recv() {
-                Ok(SocksMsg::ConnectOK(_)) => unreachable!(),
-
-                Ok(SocksMsg::Data(buf)) => {
-                    if stream_write.write(&buf[..]).is_err() {
-                        stream_write.shutdown(Shutdown::Both);
-                        return Err(Error::Io)
-                    }
+            match self.client.try_recv() {
+                Ok(FromPort::NewPort(id, sender)) => {
+                    self.ports.insert(id, sender);
+                    self.server.buffer_msg(ClientMsg::OpenPort(id));
                 },
+                Ok(FromPort::Client(c_msg)) => self.process_client_msg(c_msg),
+                Err(TryRecvError::Empty) => break,
+                // All senders have lost. No more client messages will arrive.
+                Err(TryRecvError::Disconnected) =>
+                    return Ok(().into()),
+            }
+        }
+        let _ = self.server.poll_flush()?;
 
-                Ok(SocksMsg::ShutdownWrite) => {
-                    stream_write.shutdown(Shutdown::Write);
-                    //let total_time = (get_time() - self.alive_time).num_seconds();
-                    //println!("task {}: finished in {}seconds.", self.id, total_time);
-                    return Ok(())
+        // Continue no matter previous flush ready or not ready.
+        // Check server side messages.
+        loop {
+            match try_ready!(self.server.poll()) {
+                Some(s_msg) => self.process_server_msg(s_msg),
+                // Disconnected from server.
+                None =>
+                    return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "")),
+            }
+        }
+    }
+}
+
+struct Server {
+    stream: TcpStream,
+    buffer: BytesMut,
+}
+
+impl Server {
+    fn new(stream: TcpStream) -> Server {
+        Server {
+            stream,
+            buffer: BytesMut::new(),
+        }
+    }
+
+    fn fill_buffer(&mut self) -> Poll<(), io::Error> {
+        loop {
+            self.buffer.reserve(1024);
+            let n = try_ready!(self.stream.read_buf(&mut self.buffer));
+            if n == 0 {
+                return Ok(Async::Ready(()))
+            }
+        }
+    }
+
+    fn buffer_msg(&mut self, msg: ClientMsg) {
+        msg.encode(&mut self.buffer);
+    }
+
+    fn poll_flush(&mut self) -> Poll<(), io::Error> {
+        while !self.buffer.is_empty() {
+            let len = try_nb!(self.stream.write(&self.buffer));
+            assert!(len > 0);
+            self.buffer.advance(len);
+        }
+        Ok(Async::Ready(()))
+    }
+}
+
+enum ParseResult {
+    Ok { msg: ServerMsg, consumed: usize },
+    Incomplete,
+    Err,
+}
+
+impl Stream for Server {
+    type Item = ServerMsg;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<ServerMsg>, io::Error> {
+        let eof = self.fill_buffer()?.is_ready();
+
+        let res = {
+            match parse_server_msg(&self.buffer) {
+                Ok((remain, msg)) => {
+                    let len = self.buffer.len();
+                    let remain = remain.len();
+                    ParseResult::Ok{ msg, consumed: len - remain }
                 },
-
-                _ => {
-                    let _= stream_write.shutdown(Shutdown::Both);
-                    return Err(Error::ServerClosedConnection)
+                Err(Incomplete(_)) => ParseResult::Incomplete,
+                Err(e) => {
+                    println!("parse error: {}", e);
+                    ParseResult::Err
                 },
             }
+        };
+
+        match res {
+            ParseResult::Ok { msg, consumed } => {
+                self.buffer.advance(consumed);
+                return Ok(Async::Ready(Some(msg)))
+            },
+            ParseResult::Incomplete => {},
+            ParseResult::Err => 
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "ServerMsg")),
+        }
+
+        if eof {
+            Ok(Async::Ready(None))
+        } else {
+            Ok(Async::NotReady)
         }
     }
 }
@@ -277,17 +277,21 @@ pub struct Client;
 
 impl Client {
     pub fn new(listen_addr: &str, server_addr: &str) {
-        let listening = TcpListener::bind(listen_addr).unwrap();
+        let mut lp = Core::new().unwrap();
+        let handle = lp.handle();
+        let listen_addr = listen_addr.parse().unwrap();
+
+        let listening = TcpListener::bind(&listen_addr, &handle).unwrap();
         let mut tunnel = Tunnel::new(server_addr);
 
-        listening.incoming().for_each(|s| {
+        let client = listening.incoming().for_each(move |(stream, _)| {
             // TODO: Quit if tunnel broken
-            if let (Ok(stream), Ok(connector)) = (s, tunnel.connect()) { 
-                thread::spawn(move || {
-                    SocksConnection::new(stream, connector);
-                });
-            }
+            let mut port = tunnel.connect();
+            let proxy = SocksConnection::new(handle.clone()).serve(stream, port);
+            handle.spawn(proxy.then(|_| future::ok(())));
+            Ok(())
         });
+        
+        lp.run(client).unwrap()
     }
 }
-
