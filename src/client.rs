@@ -113,7 +113,7 @@ struct RunTunnel {
 
 impl RunTunnel {
     fn process_server_msg(&mut self, s_msg: ServerMsg) {
-        println!("get server message: {}", s_msg);
+        //println!("get server message: {}", s_msg);
         match s_msg {
             ServerMsg::HeartBeatRsp => {},
 
@@ -192,21 +192,23 @@ impl Future for RunTunnel {
 
 struct Server {
     stream: TcpStream,
-    buffer: BytesMut,
+    r_buffer: BytesMut,
+    w_buffer: BytesMut,
 }
 
 impl Server {
     fn new(stream: TcpStream) -> Server {
         Server {
             stream,
-            buffer: BytesMut::new(),
+            r_buffer: BytesMut::new(),
+            w_buffer: BytesMut::new(),
         }
     }
 
     fn fill_buffer(&mut self) -> Poll<(), io::Error> {
         loop {
-            self.buffer.reserve(1024);
-            let n = try_ready!(self.stream.read_buf(&mut self.buffer));
+            self.r_buffer.reserve(1024);
+            let n = try_ready!(self.stream.read_buf(&mut self.r_buffer));
             if n == 0 {
                 return Ok(Async::Ready(()))
             }
@@ -214,14 +216,17 @@ impl Server {
     }
 
     fn buffer_msg(&mut self, msg: ClientMsg) {
-        msg.encode(&mut self.buffer);
+        if self.w_buffer.remaining_mut() < 10 {
+            self.w_buffer.reserve(32);
+        }
+        msg.encode(&mut self.w_buffer);
     }
 
     fn poll_flush(&mut self) -> Poll<(), io::Error> {
-        while !self.buffer.is_empty() {
-            let len = try_nb!(self.stream.write(&self.buffer));
+        while !self.w_buffer.is_empty() {
+            let len = try_nb!(self.stream.write(&self.w_buffer));
             assert!(len > 0);
-            self.buffer.advance(len);
+            self.w_buffer.advance(len);
         }
         Ok(Async::Ready(()))
     }
@@ -241,10 +246,10 @@ impl Stream for Server {
         let eof = self.fill_buffer()?.is_ready();
 
         let res = {
-            match parse_server_msg(&self.buffer) {
+            match parse_server_msg(&self.r_buffer) {
                 Ok((remain, msg)) => {
-                    let len = self.buffer.len();
                     let remain = remain.len();
+                    let len = self.r_buffer.len();
                     ParseResult::Ok{ msg, consumed: len - remain }
                 },
                 Err(Incomplete(_)) => ParseResult::Incomplete,
@@ -257,10 +262,13 @@ impl Stream for Server {
 
         match res {
             ParseResult::Ok { msg, consumed } => {
-                self.buffer.advance(consumed);
+                self.r_buffer.advance(consumed);
+                //println!("consumed {}, msg: {}", consumed, msg);
                 return Ok(Async::Ready(Some(msg)))
             },
-            ParseResult::Incomplete => {},
+            ParseResult::Incomplete => {
+                //println!("incomplete, now buffer has {}", self.r_buffer.len());
+            },
             ParseResult::Err => 
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "ServerMsg")),
         }
