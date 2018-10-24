@@ -161,3 +161,9 @@ impl AsyncWrite for TunnelPort {
         Ok(Async::Ready(()))
     }
 }
+
+impl Drop for TunnelPort {
+    fn drop(&mut self) {
+        self.sender.send(FromPort::Client(ClientMsg::ClosePort(self.id)));
+    }
+}

@@ -56,7 +56,14 @@ impl fmt::Display for ServerMsg {
 
         match *self {
             HeartBeatRsp => write!(f, "{}", "HeartBeatRsp"),
-            ConnectOK(id, _) => write!(f, "Connected on port {}", id),
+            ConnectOK(id, ref buf) => {
+                let res = if buf.is_empty() {
+                    "failed"
+                } else {
+                    "successed"
+                };
+                write!(f, "Connect {} on port {}", res, id)
+            },
             Data(id, ref buf) =>
                 write!(f, "Data for port {} of size {}", id, buf.len()),
             ShutdownWrite(id) => write!(f, "Server EOF of {}", id),

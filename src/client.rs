@@ -38,7 +38,7 @@ impl PortMap {
 
     fn send(&mut self, id: Id, msg: ToPort) {
         self.0.get(&id).map(|v| {
-            v.unbounded_send(msg).expect("failed to send message to port")
+            v.unbounded_send(msg).expect("port has been dropped")
         });
     }
 }
