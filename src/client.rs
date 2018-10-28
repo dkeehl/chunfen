@@ -52,7 +52,8 @@ struct Tunnel {
 impl Tunnel {
     pub fn new(server: &str) -> Tunnel {
         //let addr: SocketAddr = server.parse().unwrap();
-        let stream = net::TcpStream::connect(server).unwrap();
+        let stream = net::TcpStream::connect(server)
+            .expect("can't connect to server");
         let (sender, receiver) = mpsc::channel();
         let cloned_sender = sender.clone();
         thread::spawn(move || {
@@ -101,7 +102,9 @@ fn run_tunnel(stream: net::TcpStream,
     let handle = lp.handle();
     let mut stream = TcpStream::from_stream(stream, &handle).unwrap();
     let tunnel = Tunnel::run(stream, sender, receiver, handle);
-    lp.run(tunnel).unwrap()
+    if let Err(e) = lp.run(tunnel) {
+        println!("an error occured: {}", e);
+    }
 }
 
 struct RunTunnel {
@@ -134,7 +137,6 @@ impl RunTunnel {
     }
 
     fn process_port_msg(&mut self, msg: FromPort<ClientMsg>) {
-        //println!("get client message {:?}", c_msg);
         let c_msg = match msg {
             FromPort::NewPort(id, sender) => {
                 self.ports.insert(id, sender);
@@ -148,6 +150,7 @@ impl RunTunnel {
             },
             FromPort::Payload(m) => m,
         };
+        println!("sending {}", c_msg);
         self.server.buffer_msg(c_msg);
     }
 }
