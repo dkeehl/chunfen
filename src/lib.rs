@@ -14,16 +14,15 @@ extern crate bytes;
 #[macro_use]
 extern crate nom;
 
-use std::net::TcpStream;
-use std::io::{self, Read, Write};
-use bytes::{BytesMut, Bytes};
+use bytes::Bytes;
 
 pub mod socks;
 pub mod tunnel_port;
 pub mod client;
-//pub mod server;
+pub mod server;
 pub mod utils;
 pub mod protocol;
+pub mod framed;
 //pub mod security;
 
 type Id = u32;
@@ -32,6 +31,7 @@ type DomainName = Bytes;
 
 type Port = u16;
 
+/*
 trait WriteStream<T> {
     fn write_stream(&mut self, msg: T) -> io::Result<()>;
 }
@@ -92,7 +92,4 @@ trait WriteSize: Write {
 impl ReadSize for TcpStream {}
 
 impl WriteSize for TcpStream {}
-
-trait Encode {
-    fn encode(&self, dest: &mut BytesMut);
-}
+*/

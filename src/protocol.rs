@@ -1,9 +1,10 @@
 use std::fmt;
 
-use nom::Endianness;
+use nom::{IResult, Endianness};
 use bytes::{BufMut, BytesMut, Bytes};
 
-use {Id, DomainName, Port, Encode};
+use {Id, DomainName, Port};
+use utils::{Encode, Decode};
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
 pub const ALIVE_TIMEOUT_TIME_MS: i64 = 60000;
@@ -55,7 +56,7 @@ impl fmt::Display for ServerMsg {
         use self::ServerMsg::*;
 
         match *self {
-            HeartBeatRsp => write!(f, "{}", "HeartBeatRsp"),
+            HeartBeatRsp => write!(f, "HeartBeatRsp"),
             ConnectOK(id, ref buf) => {
                 let res = if buf.is_empty() {
                     "failed"
@@ -67,6 +68,22 @@ impl fmt::Display for ServerMsg {
             Data(id, ref buf) =>
                 write!(f, "Data for port {} of size {}", id, buf.len()),
             ShutdownWrite(id) => write!(f, "Server EOF of {}", id),
+            ClosePort(id) => write!(f, "Close port {}", id),
+        }
+    }
+}
+
+impl fmt::Display for ClientMsg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::ClientMsg::*;
+
+        match *self {
+            HeartBeat => write!(f, "HeartBeat"),
+            OpenPort(id) => write!(f, "Request to open port {}", id),
+            Connect(id, _) => write!(f, "Port {} connects ip", id),
+            ConnectDN(id, ..) => write!(f, "Port {} connects domain name", id),
+            Data(id, ref buf) => write!(f, "Data from port {}, size {}", id, buf.len()),
+            ShutdownWrite(id) => write!(f, "Client EOF of {}", id),
             ClosePort(id) => write!(f, "Close port {}", id),
         }
     }
@@ -142,6 +159,18 @@ impl Encode for ServerMsg {
                 buf.put_u32_be(id);
             }
         }
+    }
+}
+
+impl Decode for ClientMsg {
+    fn decode(src: &[u8]) -> IResult<&[u8], ClientMsg> {
+        parse_client_msg(src)
+    }
+}
+
+impl Decode for ServerMsg {
+    fn decode(src: &[u8]) -> IResult<&[u8], ServerMsg> {
+        parse_server_msg(src)
     }
 }
 

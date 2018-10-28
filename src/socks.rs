@@ -15,8 +15,8 @@ use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::io::{copy, read_exact, write_all,};
 use bytes::{Bytes, BytesMut, BufMut};
 
-use {Encode, DomainName, Port};
-use utils::not_connected;
+use {DomainName, Port};
+use utils::{Encode, not_connected};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -147,7 +147,7 @@ impl SocksConnection {
                 Some((remote, addr)) => {
                     let resp = Resp::Success(addr);
                     boxup(response(stream, &resp).and_then(|stream| {
-                        pipe(stream, remote)
+                        pipe(stream, remote).map_err(SocksError::IO)
                     }))
                 },
                 None => {
@@ -163,7 +163,7 @@ impl SocksConnection {
     }
 }
 
-fn pipe<T, S>(a: T, b: S) -> Box<Future<Item = (usize, usize), Error = SocksError>>
+pub fn pipe<T, S>(a: T, b: S) -> Box<Future<Item = (usize, usize), Error = io::Error>>
     where
         T: AsyncRead + AsyncWrite + 'static,
         S: AsyncRead + AsyncWrite + 'static
@@ -175,7 +175,7 @@ fn pipe<T, S>(a: T, b: S) -> Box<Future<Item = (usize, usize), Error = SocksErro
         .map(|(n, _, _)| n as usize);
     let half2 = copy(b_read, a_write)
         .map(|(n, _, _)| n as usize);
-    boxup(half1.join(half2).map_err(SocksError::IO))
+    boxup(half1.join(half2))
 }
 
 fn response(stream: TcpStream, resp: &Resp)
