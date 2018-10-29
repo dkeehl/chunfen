@@ -31,15 +31,7 @@ where O: Encode
     fn fill_buffer(&mut self) -> Poll<(), io::Error> {
         loop {
             self.r_buffer.reserve(1024);
-            //let n = try_ready!(self.stream.read_buf(&mut self.r_buffer));
-            let n = match self.stream.read_buf(&mut self.r_buffer) {
-                Ok(Async::Ready(n)) => n,
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Err(e) => {
-                    println!("read server {}", e);
-                    return Err(e) 
-                },
-            };
+            let n = try_ready!(self.stream.read_buf(&mut self.r_buffer));
             if n == 0 {
                 return Ok(Async::Ready(()))
             }

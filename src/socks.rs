@@ -142,12 +142,13 @@ impl SocksConnection {
             }.map(|conn| (stream, conn)).map_err(SocksError::IO)
         });
 
+        let handle = self.handle.clone();
         let res = connected.and_then(|(stream, conn)| {
             match conn {
                 Some((remote, addr)) => {
                     let resp = Resp::Success(addr);
                     boxup(response(stream, &resp).and_then(|stream| {
-                        pipe(stream, remote).map_err(SocksError::IO)
+                        pipe(stream, remote, handle).map_err(SocksError::IO)
                     }))
                 },
                 None => {
@@ -163,7 +164,8 @@ impl SocksConnection {
     }
 }
 
-pub fn pipe<T, S>(a: T, b: S) -> Box<Future<Item = (usize, usize), Error = io::Error>>
+pub fn pipe<T, S>(a: T, b: S, handle: Handle)
+    -> Box<Future<Item = (usize, usize), Error = io::Error>>
     where
         T: AsyncRead + AsyncWrite + 'static,
         S: AsyncRead + AsyncWrite + 'static
@@ -171,11 +173,21 @@ pub fn pipe<T, S>(a: T, b: S) -> Box<Future<Item = (usize, usize), Error = io::E
     let (a_read, a_write) = a.split();
     let (b_read, b_write) = b.split();
 
+    let hdl = handle.clone();
     let half1 = copy(a_read, b_write)
-        .map(|(n, _, _)| n as usize);
+        .map(|res| shutdown_and_return(res, hdl));
     let half2 = copy(b_read, a_write)
-        .map(|(n, _, _)| n as usize);
+        .map(|res| shutdown_and_return(res, handle));
     boxup(half1.join(half2))
+}
+
+fn shutdown_and_return<R, W>(res: (u64, R, W), handle: Handle) -> usize where
+    W: AsyncWrite + 'static
+{ 
+    let (n, _, mut wt) = res;
+    let shutdown = future::poll_fn(move || wt.shutdown());
+    handle.spawn(drop_res!(shutdown));
+    n as usize
 }
 
 fn response(stream: TcpStream, resp: &Resp)

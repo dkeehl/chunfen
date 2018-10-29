@@ -1,6 +1,6 @@
 use std::net::{self, SocketAddr, SocketAddrV4, Shutdown, ToSocketAddrs};
 use std::thread;
-use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
+//use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
 use std::io::{self, Write, Read};
 use std::collections::HashMap;
 
@@ -9,8 +9,8 @@ use tokio_core::reactor::{Core, Handle};
 use tokio_core::net::{TcpStream, TcpListener};
 use tokio_io::{AsyncRead, AsyncWrite};
 use futures::future;
-use futures::{Stream, Future, Poll, Async};
-use futures::sync::mpsc::UnboundedSender;
+use futures::{Sink, Stream, Future, Poll, Async};
+use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{BufMut, BytesMut};
 
 use {DomainName, Port, Id};
@@ -20,23 +20,32 @@ use utils::{self, Timer};
 use tunnel_port::{ToPort, FromPort, TunnelPort};
 use protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 
-struct PortMap(HashMap<Id, UnboundedSender<ToPort>>);
+struct PortMap {
+    ports: HashMap<Id, Sender<ToPort>>,
+    handle: Handle
+}
 
 impl PortMap {
-    fn new() -> PortMap {
-        PortMap(HashMap::new())
+    fn new(handle: &Handle) -> PortMap {
+        PortMap {
+            ports: HashMap::new(),
+            handle: handle.clone(),
+        }
     }
 
-    fn insert(&mut self, id: Id, sender: UnboundedSender<ToPort>) {
-        let _ = self.0.insert(id, sender);
+    fn insert(&mut self, id: Id, sender: Sender<ToPort>) {
+        let _ = self.ports.insert(id, sender);
     }
 
     fn remove(&mut self, id: Id) {
-        let _ = self.0.remove(&id);
+        let _ = self.ports.remove(&id);
     }
 
-    fn send(&mut self, id: Id, msg: ToPort) {
-        let _ = self.0.get(&id).map(|v| v.unbounded_send(msg));
+    fn send(&self, id: Id, msg: ToPort) {
+        let _ = self.ports.get(&id).map(|v| {
+            let send = v.clone().send(msg);
+            self.handle.spawn(drop_res!(send))
+        });
     }
 }
 
@@ -54,7 +63,7 @@ impl Tunnel {
         //let addr: SocketAddr = server.parse().unwrap();
         let stream = net::TcpStream::connect(server)
             .expect("can't connect to server");
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel(1000);
         let cloned_sender = sender.clone();
         thread::spawn(move || {
             run_tunnel(stream, cloned_sender, receiver)
@@ -63,14 +72,16 @@ impl Tunnel {
         Tunnel { sender, count: 0, }
     }
 
-    pub fn new_port(&mut self) -> TunnelPort<ClientMsg> {
+    pub fn new_port(&mut self, handle: &Handle) -> TunnelPort<ClientMsg> {
         let id = self.count;
         // Open a channel between the port and the tunnel. The sender is send 
         // to the tunnel, for sending data later to the corresponing port. 
-        let (sender, port) = TunnelPort::new(id, self.sender.clone());
-        self.sender
+        let (sender, port) = TunnelPort::new(id, self.sender.clone(), handle);
+        let send = self.sender.clone()
             .send(FromPort::NewPort(id, sender))
-            .expect("background tunnel broken");
+            .map(|_| ())
+            .map_err(|_| panic!("background tunnel broken"));
+        handle.spawn(send);
         self.count += 1;
         port
     }
@@ -82,7 +93,7 @@ impl Tunnel {
     {
         let server: Framed<ServerMsg, ClientMsg> = Framed::new(stream);
         let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64, &handle);
-        let ports = PortMap::new();
+        let ports = PortMap::new(&handle);
         let alive_time = get_time();
         RunTunnel {
             server,
@@ -172,18 +183,17 @@ impl Future for RunTunnel {
 
         // Timer is not ready.
         // Check client messages.
-        let mut ready = true;
-        while ready {
-            match self.client.try_recv() {
-                Ok(msg) => self.process_port_msg(msg),
-                Err(TryRecvError::Empty) => {},
-                // All senders have lost. No more client messages will arrive.
-                Err(TryRecvError::Disconnected) =>
-                    return Ok(().into()),
+        loop {
+            match self.client.poll().unwrap() {
+                Async::Ready(Some(msg)) => self.process_port_msg(msg),
+                Async::Ready(None) => return self.server.poll_flush(),
+                Async::NotReady => break,
             }
-            ready = ready && self.server.poll_flush()?.is_ready();
+        }
+        let _ = self.server.poll_flush()?;
 
-            // Check server side messages.
+        // Check server side messages.
+        loop {
             match self.server.poll()? {
                 Async::Ready(Some(s_msg)) => {
                     self.process_server_msg(s_msg);
@@ -192,7 +202,7 @@ impl Future for RunTunnel {
                 // Disconnected from server.
                 Async::Ready(None) =>
                     return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "")),
-                Async::NotReady => ready = false,
+                Async::NotReady => break,
             }
         }
         Ok(Async::NotReady)
@@ -212,7 +222,7 @@ impl Client {
 
         let client = listening.incoming().for_each(move |(stream, _)| {
             // TODO: Quit if tunnel broken
-            let mut port = tunnel.new_port();
+            let mut port = tunnel.new_port(&handle);
             let proxy = SocksConnection::new(handle.clone()).serve(stream, port);
             handle.spawn(proxy.then(|_| future::ok(())));
             Ok(())

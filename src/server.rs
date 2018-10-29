@@ -1,8 +1,5 @@
-use std::net::{self, TcpListener, SocketAddr, SocketAddrV4, Shutdown};
-use std::sync::mpsc::{self, Sender, Receiver, SyncSender, TryRecvError};
-use std::thread;
-use std::io;
-use std::io::Write;
+use std::net::{self, TcpListener, SocketAddr, SocketAddrV4};
+use std::io::{self, Write};
 use std::collections::HashMap;
 
 use time::{Timespec, get_time};
@@ -10,8 +7,8 @@ use tokio_core::reactor::{Core, Handle};
 use tokio_core::net::TcpStream;
 use tokio_io::{AsyncRead, AsyncWrite};
 use futures::future;
-use futures::{Stream, Future, Poll, Async};
-use futures::sync::mpsc::UnboundedSender;
+use futures::{Sink, Stream, Future, Poll, Async};
+use futures::sync::mpsc::{self, Receiver, Sender};
 use bytes::{BufMut, BytesMut, Bytes};
 use nom::Err::Incomplete;
 
@@ -52,7 +49,7 @@ impl Tunnel {
         let handle = lp.handle();
 
         let mut stream = TcpStream::from_stream(stream, &handle).unwrap();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel(1000);
 
         let tunnel = Tunnel {
             client: Framed::new(stream),
@@ -79,34 +76,28 @@ impl Future for Tunnel {
             return self.client.poll_flush()
         }
 
-        let mut read_ready = true;
-        let mut msg_ready = true;
-        while read_ready | msg_ready {
-            if read_ready {
-                match self.client.poll()? {
-                    Async::Ready(Some(c_msg)) => {
-                        //println!("get client message {}", c_msg);
-                        self.process_client_msg(c_msg);
-                        self.alive_time = get_time();
-                    },
-                    // Client EOF
-                    Async::Ready(None) => return self.client.poll_flush(),
-                    Async::NotReady => read_ready = false,
-                }
+        loop {
+            match self.client.poll()? {
+                Async::Ready(Some(c_msg)) => {
+                    //println!("get client message {}", c_msg);
+                    self.process_client_msg(c_msg);
+                    self.alive_time = get_time();
+                },
+                // Client EOF
+                Async::Ready(None) => return self.client.poll_flush(),
+                Async::NotReady => break,
             }
-
-            if msg_ready {
-                match self.connections.try_recv() {
-                    Ok(msg) => self.process_port_msg(msg),
-                    Err(TryRecvError::Empty) => msg_ready = false,
-                    // We always have a sender in the tunnel.
-                    Err(TryRecvError::Disconnected) => unreachable!(),
-                }
-            }
-
-            self.client.poll_flush();
         }
-        // here ready = false
+
+        loop {
+            match self.connections.poll().unwrap() {
+                Async::Ready(Some(msg)) => self.process_port_msg(msg),
+                // We always have a sender in the tunnel.
+                Async::Ready(None) => unreachable!(),
+                Async::NotReady => break,
+            }
+        }
+        let _ = self.client.poll_flush()?;
         Ok(Async::NotReady)
     }
 }
@@ -156,7 +147,7 @@ impl Tunnel {
 
 struct PortMap {
     // a port is created after it connected.
-    ports: HashMap<Id, Option<UnboundedSender<ToPort>>>,
+    ports: HashMap<Id, Option<Sender<ToPort>>>,
     // For making new ports.
     sender: Sender<FromPort<ServerMsg>>,
     handle: Handle
@@ -179,12 +170,9 @@ impl PortMap {
         let _ = self.ports.remove(&id);
     }
 
-    fn len(&self) -> usize {
-        self.ports.len()
-    }
-
     fn connect(&mut self, id: Id, addr: SocketAddr)  {
-        let (sender, port) = TunnelPort::new(id, self.sender.clone());
+        let handle = self.handle.clone();
+        let (sender, port) = TunnelPort::new(id, self.sender.clone(), &handle);
         let _ = self.ports.insert(id, Some(sender));
 
         // Connect in a new thread, to avoid the connect action blocking the
@@ -194,12 +182,12 @@ impl PortMap {
             let bind_addr = format!("{}", stream.local_addr().unwrap());
             //println!("{}", bind_addr);
             let buf = Bytes::from(bind_addr.as_bytes());
-            port.send(ServerMsg::ConnectOK(id, buf));
+            port.send_raw(ServerMsg::ConnectOK(id, buf));
 
-            pipe(stream, port)
-        }).map(|_| ()).map_err(|_| ());
+            pipe(stream, port, handle)
+        });
 
-        self.handle.spawn(proxing);
+        self.handle.spawn(drop_res!(proxing));
     }
 
     fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port) {
@@ -207,21 +195,24 @@ impl PortMap {
             self.connect(id, addr);
         } else {
             let buf = Bytes::new();
-            self.sender.send(FromPort::Payload(ServerMsg::ConnectOK(id, buf)));
+            let send = self.sender.clone()
+                .send(FromPort::Payload(ServerMsg::ConnectOK(id, buf)));
+            self.handle.spawn(drop_res!(send))
+        }
+    }
+
+    fn send_to_port(&self, id: Id, msg: ToPort) {
+        if let Some(Some(port)) = self.ports.get(&id) {
+            let send = port.clone().send(msg);
+            self.handle.spawn(drop_res!(send))
         }
     }
 
     fn send_data(&mut self, id: Id, data: Bytes) {
-        if let Some(Some(port)) = self.ports.get(&id) {
-            // Ports send close messages when dropped.
-            // So it's safe to drop the send result.
-            let _ = port.unbounded_send(ToPort::Data(data));
-        }
+         self.send_to_port(id, ToPort::Data(data))
     }
 
     fn shutdown_write(&mut self, id: Id) {
-        if let Some(Some(port)) = self.ports.get(&id) {
-            let _ = port.unbounded_send(ToPort::ShutdownWrite);
-        }
+         self.send_to_port(id, ToPort::ShutdownWrite)
     }
 }

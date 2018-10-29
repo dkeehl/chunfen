@@ -1,16 +1,14 @@
 //
 // Tunnel Port
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
-use std::mem;
-use std::sync::mpsc::Sender;
 use std::io::{self, Write, Read};
 use std::str::from_utf8;
 
 use tokio_core::reactor::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
 use futures::future;
-use futures::{Stream, Future, Poll, Async};
-use futures::sync::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
+use futures::{Sink, Stream, Future, Poll, Async};
+use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{Bytes, BufMut, BytesMut};
 
 use {DomainName, Port, Id};
@@ -19,7 +17,7 @@ use protocol::ClientMsg;
 
 #[derive(Debug)]
 pub enum FromPort<T> {
-    NewPort(Id, UnboundedSender<ToPort>),
+    NewPort(Id, Sender<ToPort>),
     Data(Id, Bytes),
     ShutdownWrite(Id),
     Close(Id),
@@ -37,19 +35,23 @@ pub enum ToPort {
 
 pub struct TunnelPort<T> {
     id: Id,
+    handle: Handle,
     sender: Sender<FromPort<T>>,
-    receiver: UnboundedReceiver<ToPort>,
+    receiver: Receiver<ToPort>,
     buffer: BytesMut,
     eof: bool
 }
 
-impl<T> TunnelPort<T> {
-    pub fn new(id: Id, sender: Sender<FromPort<T>>)
-        -> (UnboundedSender<ToPort>, TunnelPort<T>)
+impl<T> TunnelPort<T>
+where T: 'static
+{
+    pub fn new(id: Id, sender: Sender<FromPort<T>>, handle: &Handle)
+        -> (Sender<ToPort>, TunnelPort<T>)
     {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = mpsc::channel(10);
         let port = TunnelPort {
             id,
+            handle: handle.clone(),
             sender,
             receiver:  rx,
             buffer: BytesMut::new(),
@@ -62,8 +64,13 @@ impl<T> TunnelPort<T> {
         PortConnectFuture(Some(self))
     }
 
-    pub fn send(&self, msg: T) {
-        let _ = self.sender.send(FromPort::Payload(msg));
+    pub fn send_raw(&self, msg: T) {
+        self.send(FromPort::Payload(msg))
+    }
+
+    fn send(&self, msg: FromPort<T>) {
+        let send = self.sender.clone().send(msg);
+        self.handle.spawn(drop_res!(send))
     }
 }
 
@@ -97,8 +104,8 @@ impl Connector for TunnelPort<ClientMsg> {
         -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
         let addr = format!("{}", addr);
-        let buf = Bytes::from(&addr.into_bytes()[..]);
-        self.sender.send(FromPort::Payload(ClientMsg::Connect(self.id, buf)));
+        let buf = Bytes::from(addr.as_bytes());
+        self.send_raw(ClientMsg::Connect(self.id, buf));
 
         Box::new(self.to_connect_future())
     }
@@ -106,7 +113,7 @@ impl Connector for TunnelPort<ClientMsg> {
     fn connect_dn(self, dn: DomainName, port: Port, _: &Handle)
         -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
-        self.sender.send(FromPort::Payload(ClientMsg::ConnectDN(self.id, dn, port)));
+        self.send_raw(ClientMsg::ConnectDN(self.id, dn, port));
         Box::new(self.to_connect_future())
     }
 }
@@ -117,12 +124,12 @@ fn try_get_binded_addr(buf: &[u8]) -> Option<SocketAddr> {
         .and_then(|mut addr_iter| addr_iter.nth(0))
 }
 
-impl<T> Write for TunnelPort<T> {
+impl<T: 'static> Write for TunnelPort<T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = buf.len();
         let data = Bytes::from(buf);
         // println!("client data size {}", data.len());
-        self.sender.send(FromPort::Data(self.id, data));
+        self.send(FromPort::Data(self.id, data));
         Ok(len)
     }
 
@@ -162,17 +169,19 @@ impl<T> Read for TunnelPort<T> {
 
 impl<T> AsyncRead for TunnelPort<T> {}
 
-impl<T> AsyncWrite for TunnelPort<T> {
+impl<T: 'static> AsyncWrite for TunnelPort<T> {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
-        self.sender.send(FromPort::ShutdownWrite(self.id));
-        self.sender.send(FromPort::Close(self.id));
+        self.send(FromPort::ShutdownWrite(self.id));
+        self.send(FromPort::Close(self.id));
         Ok(Async::Ready(()))
     }
 }
 
-impl<T> Drop for TunnelPort<T> {
+/*
+impl<T: 'static> Drop for TunnelPort<T> {
     fn drop(&mut self) {
-        self.sender.send(FromPort::ShutdownWrite(self.id));
-        self.sender.send(FromPort::Close(self.id));
+        self.send(FromPort::ShutdownWrite(self.id));
+        self.send(FromPort::Close(self.id));
     }
 }
+*/

@@ -16,6 +16,10 @@ use nom::IResult;
 
 use {Id, DomainName, Port};
 
+macro_rules! drop_res {
+    ($fut:expr) => ($fut.map(|_| ()).map_err(|_| ()))
+}
+
 // Errors
 pub fn not_connected() -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, "not connected")
@@ -29,29 +33,6 @@ pub trait Encode {
 pub trait Decode {
     fn decode(src: &[u8]) -> IResult<&[u8], Self>
         where Self: Sized;
-}
-
-// Transfer
-pub trait SenderWithId<T> {
-    fn get_id(&self) -> Id;
-
-    fn get_sender(&self) -> &Sender<T>;
-}
-
-pub fn write_id_data<T, U, F>(t: &mut T, buf: &[u8], f: F)
-    -> io::Result<usize> where
-    T: SenderWithId<U>, F: FnOnce(Id, Vec<u8>) -> U
-{
-        let size: usize = 1024;
-        let mut to: Vec<u8> = Vec::new();
-        let len = buf.len();
-        let res = if len > size {
-            to.write(&buf[..size])?
-        } else {
-            to.write(buf)?
-        };
-        t.get_sender().send(f(t.get_id(), to));
-        Ok(res)
 }
 
 // Domainname
