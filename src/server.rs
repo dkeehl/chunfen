@@ -12,12 +12,12 @@ use futures::sync::mpsc::{self, Receiver, Sender};
 use bytes::{BufMut, BytesMut, Bytes};
 use nom::Err::Incomplete;
 
-use {Id, DomainName, Port}; 
-use socks::pipe;
-use protocol::{ServerMsg, ClientMsg, ALIVE_TIMEOUT_TIME_MS};
-use utils::*;
-use framed::Framed;
-use tunnel_port::{TunnelPort, FromPort, ToPort};
+use crate::socks::pipe;
+use crate::{Id, DomainName, Port}; 
+use crate::protocol::{ServerMsg, ClientMsg, ALIVE_TIMEOUT_TIME_MS};
+use crate::utils::*;
+use crate::framed::Framed;
+use crate::tunnel_port::{TunnelPort, FromPort, ToPort};
 
 pub struct Server;
 

@@ -3,8 +3,8 @@ use std::fmt;
 use nom::{IResult, Endianness};
 use bytes::{BufMut, BytesMut, Bytes};
 
-use {Id, DomainName, Port};
-use utils::{Encode, Decode};
+use crate::{Id, DomainName, Port};
+use crate::utils::{Encode, Decode};
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
 pub const ALIVE_TIMEOUT_TIME_MS: i64 = 60000;
@@ -93,7 +93,7 @@ impl fmt::Display for ClientMsg {
 
 impl Encode for ClientMsg {
     fn encode(&self, buf: &mut BytesMut) {
-        use protocol::ClientMsg::*;
+        use self::ClientMsg::*;
 
         if buf.remaining_mut() < MAX_HEADER_LEN {
             buf.reserve(MAX_HEADER_LEN);
@@ -138,7 +138,7 @@ impl Encode for ClientMsg {
 
 impl Encode for ServerMsg {
     fn encode(&self, buf: &mut BytesMut) {
-        use protocol::ServerMsg::*;
+        use self::ServerMsg::*;
 
         if buf.remaining_mut() < MAX_HEADER_LEN {
             buf.reserve(MAX_HEADER_LEN);
@@ -313,7 +313,7 @@ mod test {
 
     #[test]
     fn encode_and_parse_client_msg() {
-        use protocol::ClientMsg::*;
+        use crate::protocol::ClientMsg::*;
 
         let buf: [u8; 4] = [1,2,3,4];
         let buf = BytesMut::from(&buf[..]);
@@ -338,7 +338,7 @@ mod test {
 
     #[test]
     fn encode_and_parse_server_msg() {
-        use protocol::ServerMsg::*;
+        use crate::protocol::ServerMsg::*;
 
         let buf: [u8; 4] = [1,2,3,4];
         let buf = BytesMut::from(&buf[..]);

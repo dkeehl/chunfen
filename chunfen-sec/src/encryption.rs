@@ -1,10 +1,10 @@
 use std::io::Write;
-use security::{PlainText, CipherText, ContentType, Encrypted,
+use crate::{PlainText, CipherText, ContentType, Encrypted,
     BorrowedMessage, TLSError,};
-use security::codec::{self, Codec};
-use security::fragmenter::MAX_FRAGMENT_LEN;
-use security::key_schedule::{derive_traffic_key, derive_traffic_iv};
-use security::suites::SupportedCipherSuite;
+use crate::codec::{self, Codec};
+use crate::fragmenter::MAX_FRAGMENT_LEN;
+use crate::key_schedule::{derive_traffic_key, derive_traffic_iv};
+use crate::suites::SupportedCipherSuite;
 use ring;
 
 pub trait MsgEncryptor {
@@ -193,11 +193,11 @@ impl MsgDecryptor for TLS13MessageDecrypter {
 #[cfg(test)]
 mod test {
     use std::vec::Vec;
-    use security::rand;
-    use security::{PlainText, ContentType};
-    use security::codec::Codec;
+    use crate::rand;
+    use crate::{PlainText, ContentType};
+    use crate::codec::Codec;
     use super::{MsgEncryptor, MsgDecryptor};
-    use security::suites::TLS13_AES_128_GCM_SHA256;
+    use crate::suites::TLS13_AES_128_GCM_SHA256;
 
     const SECRET: &[u8] = b"encryption_test";
 

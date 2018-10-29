@@ -7,7 +7,7 @@ use tokio_core::net::TcpStream;
 use tokio_io::AsyncRead;
 use nom::Err::Incomplete;
 
-use utils::{Encode, Decode};
+use crate::utils::{Encode, Decode};
 
 pub struct Framed<I, O> {
     stream: TcpStream,

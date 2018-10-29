@@ -11,9 +11,9 @@ use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{Bytes, BufMut, BytesMut};
 
-use {DomainName, Port, Id};
-use socks::Connector;
-use protocol::ClientMsg;
+use crate::socks::Connector;
+use crate::{DomainName, Port, Id};
+use crate::protocol::ClientMsg;
 
 #[derive(Debug)]
 pub enum FromPort<T> {

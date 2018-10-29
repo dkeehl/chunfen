@@ -1,22 +1,22 @@
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs, Shutdown,};
+extern crate futures;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate bytes;
+
+use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs};
 use std::vec::Vec;
 use std::convert::From;
 use std::io::{self, Read, Write};
-use std::marker::{Sized, Send};
+use std::marker::{Sized};
 use std::str::from_utf8;
-use std::rc::Rc;
-use std::cell::RefCell;
 
-use futures::future::{self, Either};
-use futures::{Future, Poll, Async, Stream};
+use futures::future;
+use futures::{Future, Poll, Stream};
 use tokio_core::net::{TcpStream, TcpListener};
 use tokio_core::reactor::{Handle, Core};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::io::{copy, read_exact, write_all,};
 use bytes::{Bytes, BytesMut, BufMut};
-
-use {DomainName, Port};
-use utils::{Encode, not_connected};
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -28,6 +28,9 @@ const METHOD_NO_AUTH: u8 = 0;
 const METHOD_GSSAPI: u8 = 1;
 const METHOD_USER_PASSWORD: u8 = 2;
 const METHOD_NO_ACCP: u8 = 0xFF;
+
+type DomainName = Bytes;
+type Port = u16;
 
 #[derive(Debug)]
 pub enum SocksError {
@@ -185,8 +188,9 @@ fn shutdown_and_return<R, W>(res: (u64, R, W), handle: Handle) -> usize where
     W: AsyncWrite + 'static
 { 
     let (n, _, mut wt) = res;
-    let shutdown = future::poll_fn(move || wt.shutdown());
-    handle.spawn(drop_res!(shutdown));
+    let shutdown = future::poll_fn(move || wt.shutdown())
+        .map_err(|_| ());
+    handle.spawn(shutdown);
     n as usize
 }
 
@@ -201,7 +205,7 @@ fn response(stream: TcpStream, resp: &Resp)
     boxup(res)
 }
 
-impl Encode for Resp {
+impl Resp {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
             Resp::Select(ver, method) => 
@@ -421,9 +425,13 @@ impl Connector for SimpleConnector {
             .map(|tcp| {
                 let addr = tcp.local_addr().unwrap();
                 Some((SimpleConnector(Some(tcp)), addr))
-            }).or_else(|e| {
+            }).or_else(|_| {
                 future::ok(None)
             });
         boxup(stream)
     }
+}
+
+fn not_connected() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "not connected")
 }

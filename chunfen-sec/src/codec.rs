@@ -60,7 +60,7 @@ pub trait Codec: Debug + Sized {
 
     /// Decode yourself by fiddling with the `Reader`.
     /// Return Some if it worked, None if not.
-    fn read(&mut Reader) -> Option<Self>;
+    fn read(rd: &mut Reader) -> Option<Self>;
 
     /// Convenience function to get the results of `encode()`.
     fn get_encoding(&self) -> Vec<u8> {

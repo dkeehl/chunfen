@@ -13,12 +13,12 @@ use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{BufMut, BytesMut};
 
-use {DomainName, Port, Id};
-use framed::Framed;
-use socks::SocksConnection;
-use utils::{self, Timer};
-use tunnel_port::{ToPort, FromPort, TunnelPort};
-use protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
+use crate::socks::SocksConnection;
+use crate::{DomainName, Port, Id};
+use crate::framed::Framed;
+use crate::utils::{self, Timer};
+use crate::tunnel_port::{ToPort, FromPort, TunnelPort};
+use crate::protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 
 struct PortMap {
     ports: HashMap<Id, Sender<ToPort>>,

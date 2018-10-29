@@ -1,5 +1,5 @@
-use security::AlertDescription;
-use security::codec::Codec;
+use crate::AlertDescription;
+use crate::codec::Codec;
 
 use ring::{hmac, digest, hkdf};
 

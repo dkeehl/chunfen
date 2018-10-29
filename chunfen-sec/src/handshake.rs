@@ -1,6 +1,6 @@
 use std::io::Write;
-use security::{ContentType, PlainText, TLSError,};
-use security::codec::{Reader, Codec, self,};
+use crate::{ContentType, PlainText, TLSError,};
+use crate::codec::{Reader, Codec, self,};
 
 use ring::digest;
 

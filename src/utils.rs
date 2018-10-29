@@ -14,7 +14,7 @@ use tokio_core::reactor::{Handle, Timeout};
 use futures::{Future, Stream, Poll};
 use nom::IResult;
 
-use {Id, DomainName, Port};
+use crate::{Id, DomainName, Port};
 
 macro_rules! drop_res {
     ($fut:expr) => ($fut.map(|_| ()).map_err(|_| ()))

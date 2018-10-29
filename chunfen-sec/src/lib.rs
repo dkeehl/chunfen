@@ -1,4 +1,9 @@
+#![allow(unused)]
 /// A very limited subset of TLS
+
+#[macro_use]
+extern crate log;
+extern crate ring;
 
 use std::vec::Vec;
 use std::collections::VecDeque;
@@ -22,10 +27,10 @@ pub mod rand;
 #[cfg(test)]
 mod test;
 
-use self::codec::{Reader, Codec,};
-use self::encryption::{MsgEncryptor, MsgDecryptor};
-use self::key_schedule::KeySchedule;
-use self::suites::{SupportedCipherSuite, TLS13_AES_128_GCM_SHA256};
+use crate::codec::{Reader, Codec,};
+use crate::encryption::{MsgEncryptor, MsgDecryptor};
+use crate::key_schedule::KeySchedule;
+use crate::suites::{SupportedCipherSuite, TLS13_AES_128_GCM_SHA256};
 
 enum_builder! {@U8
     EnumName: ContentType;
@@ -519,7 +524,7 @@ impl SessionCommon {
 }
 
 pub mod fragmenter { 
-    use security::{BorrowedMessage, ContentType, PlainText};
+    use crate::{BorrowedMessage, ContentType, PlainText};
     use std::collections::VecDeque;
 
     pub const MAX_FRAGMENT_LEN: usize = 16384;

@@ -1,14 +1,14 @@
 use std::io::{self, Read, Write};
 
-use security::{Session, SessionCommon, PlainText, TLSError, ContentType,
-    AlertDescription, };
-use security::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,};
-use security::key_schedule::{SecretKind, KeySchedule,};
-use security::encryption::{MsgEncryptor, MsgDecryptor,};
-use security::codec::Codec;
-use security::rand;
-
 use ring::constant_time;
+
+use crate::{Session, SessionCommon, PlainText, TLSError, ContentType,
+    AlertDescription, };
+use crate::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,};
+use crate::key_schedule::{SecretKind, KeySchedule,};
+use crate::encryption::{MsgEncryptor, MsgDecryptor,};
+use crate::codec::Codec;
+use crate::rand;
 
 pub struct ClientSession {
     common: SessionCommon,

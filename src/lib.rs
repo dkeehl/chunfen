@@ -12,17 +12,17 @@ extern crate tokio_io;
 extern crate bytes;
 #[macro_use]
 extern crate nom;
+extern crate chunfen_socks as socks;
 
 use bytes::Bytes;
 
 #[macro_use]
 pub mod utils;
-pub mod socks;
+pub mod protocol;
+pub mod framed;
 pub mod tunnel_port;
 pub mod client;
 pub mod server;
-pub mod protocol;
-pub mod framed;
 //pub mod security;
 
 type Id = u32;
