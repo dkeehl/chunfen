@@ -39,9 +39,6 @@ where O: Encode
     }
 
     pub fn buffer_msg(&mut self, msg: O) {
-        if self.w_buffer.remaining_mut() < 10 {
-            self.w_buffer.reserve(32);
-        }
         msg.encode(&mut self.w_buffer);
     }
 

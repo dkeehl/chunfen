@@ -9,7 +9,7 @@ use utils::{Encode, Decode};
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
 pub const ALIVE_TIMEOUT_TIME_MS: i64 = 60000;
 
-mod cs {
+mod c {
     pub const OPEN_PORT: u8 = 1;
     pub const CLOSE_PORT: u8 = 2;
     pub const SHUTDOWN_WRITE: u8 = 4;
@@ -19,13 +19,15 @@ mod cs {
     pub const HEARTBEAT: u8 = 8;
 }
 
-mod sc {
+mod s {
     pub const CLOSE_PORT: u8 = 1;
     pub const SHUTDOWN_WRITE: u8 = 3;
     pub const CONNECT_OK: u8 = 4;
     pub const DATA: u8 = 5;
     pub const HEARTBEAT_RSP: u8 = 6;
 }
+
+const MAX_HEADER_LEN: usize = 1 + 4 + 4;
 
 type PortIp = Bytes;
 
@@ -93,38 +95,41 @@ impl Encode for ClientMsg {
     fn encode(&self, buf: &mut BytesMut) {
         use protocol::ClientMsg::*;
 
+        if buf.remaining_mut() < MAX_HEADER_LEN {
+            buf.reserve(MAX_HEADER_LEN);
+        }
         match *self {
-            HeartBeat => buf.put_u8(cs::HEARTBEAT),
+            HeartBeat => buf.put_u8(c::HEARTBEAT),
 
             OpenPort(id) => {
-                buf.put_u8(cs::OPEN_PORT);
+                buf.put_u8(c::OPEN_PORT);
                 buf.put_u32_be(id);
             },
             Connect(id, ref addr) => {
-                buf.put_u8(cs::CONNECT);
+                buf.put_u8(c::CONNECT);
                 buf.put_u32_be(id);
                 buf.put_u32_be(addr.len() as u32);
                 buf.extend_from_slice(&addr[..]);
             },
             ConnectDN(id, ref dn, port) => {
-                buf.put_u8(cs::CONNECT_DOMAIN_NAME);
+                buf.put_u8(c::CONNECT_DOMAIN_NAME);
                 buf.put_u32_be(id);
                 buf.put_u32_be(dn.len() as u32);
                 buf.extend_from_slice(&dn[..]);
                 buf.put_u16_be(port);
             },
             Data(id, ref data) => {
-                buf.put_u8(cs::DATA);
+                buf.put_u8(c::DATA);
                 buf.put_u32_be(id);
                 buf.put_u32_be(data.len() as u32);
                 buf.extend_from_slice(&data[..]);
             },
             ShutdownWrite(id) => {
-                buf.put_u8(cs::SHUTDOWN_WRITE);
+                buf.put_u8(c::SHUTDOWN_WRITE);
                 buf.put_u32_be(id);
             },
             ClosePort(id) => {
-                buf.put_u8(cs::CLOSE_PORT);
+                buf.put_u8(c::CLOSE_PORT);
                 buf.put_u32_be(id);
             }
         }
@@ -135,27 +140,30 @@ impl Encode for ServerMsg {
     fn encode(&self, buf: &mut BytesMut) {
         use protocol::ServerMsg::*;
 
+        if buf.remaining_mut() < MAX_HEADER_LEN {
+            buf.reserve(MAX_HEADER_LEN);
+        }
         match *self {
-            HeartBeatRsp => buf.put_u8(sc::HEARTBEAT_RSP),
+            HeartBeatRsp => buf.put_u8(s::HEARTBEAT_RSP),
 
             ConnectOK(id, ref addr) => {
-                buf.put_u8(sc::CONNECT_OK);
+                buf.put_u8(s::CONNECT_OK);
                 buf.put_u32_be(id);
                 buf.put_u32_be(addr.len() as u32);
                 buf.extend_from_slice(&addr[..]);
             },
             Data(id, ref data) => {
-                buf.put_u8(sc::DATA);
+                buf.put_u8(s::DATA);
                 buf.put_u32_be(id);
                 buf.put_u32_be(data.len() as u32);
                 buf.extend_from_slice(&data[..]);
             },
             ShutdownWrite(id) => {
-                buf.put_u8(sc::SHUTDOWN_WRITE);
+                buf.put_u8(s::SHUTDOWN_WRITE);
                 buf.put_u32_be(id);
             },
             ClosePort(id) => {
-                buf.put_u8(sc::CLOSE_PORT);
+                buf.put_u8(s::CLOSE_PORT);
                 buf.put_u32_be(id);
             }
         }
@@ -190,29 +198,29 @@ named!(sized<&[u8], Bytes>, do_parse!(
 
 // Server message.
 named!(s_heartbeat_rsp<&[u8], ServerMsg>,
-    map!(tag!([sc::HEARTBEAT_RSP]), |_| ServerMsg::HeartBeatRsp));
+    map!(tag!([s::HEARTBEAT_RSP]), |_| ServerMsg::HeartBeatRsp));
 
 named!(s_close_port<&[u8], ServerMsg>, do_parse!(
-    tag!([sc::CLOSE_PORT]) >>
+    tag!([s::CLOSE_PORT]) >>
     id: id >>
     (ServerMsg::ClosePort(id))
 ));
 
 named!(s_shutdown_write<&[u8], ServerMsg>, do_parse!(
-    tag!([sc::SHUTDOWN_WRITE]) >>
+    tag!([s::SHUTDOWN_WRITE]) >>
     id: id >>
     (ServerMsg::ShutdownWrite(id))
 ));
 
 named!(s_connect_ok<&[u8], ServerMsg>, do_parse!(
-    tag!([sc::CONNECT_OK]) >>
+    tag!([s::CONNECT_OK]) >>
     id: id >>
     buf: sized >>
     (ServerMsg::ConnectOK(id, buf))
 ));
 
 named!(s_data<&[u8], ServerMsg>, do_parse!(
-    tag!([sc::DATA]) >>
+    tag!([s::DATA]) >>
     id: id >>
     buf: sized >>
     (ServerMsg::Data(id, buf))
@@ -229,29 +237,29 @@ named!(pub parse_server_msg<&[u8], ServerMsg>, alt!(
 
 // Client message.
 named!(c_heartbeat<&[u8], ClientMsg>,
-    map!(tag!([cs::HEARTBEAT]), |_| ClientMsg::HeartBeat));
+    map!(tag!([c::HEARTBEAT]), |_| ClientMsg::HeartBeat));
 
 named!(c_open_port<&[u8], ClientMsg>, do_parse!(
-    tag!([cs::OPEN_PORT]) >>
+    tag!([c::OPEN_PORT]) >>
     id: id >>
     (ClientMsg::OpenPort(id))
 ));
 
 named!(c_close_port<&[u8], ClientMsg>, do_parse!(
-    tag!([cs::CLOSE_PORT]) >>
+    tag!([c::CLOSE_PORT]) >>
     id: id >>
     (ClientMsg::ClosePort(id))
 ));
 
 named!(c_connect<&[u8], ClientMsg>, do_parse!(
-    tag!([cs::CONNECT]) >>
+    tag!([c::CONNECT]) >>
     id: id >>
     buf: sized >>
     (ClientMsg::Connect(id, buf))
 ));
 
 named!(c_connect_dn<&[u8], ClientMsg>, do_parse!(
-    tag!([cs::CONNECT_DOMAIN_NAME]) >>
+    tag!([c::CONNECT_DOMAIN_NAME]) >>
     id: id >>
     buf: sized >>
     port: u16!(BE) >>
@@ -259,14 +267,14 @@ named!(c_connect_dn<&[u8], ClientMsg>, do_parse!(
 ));
 
 named!(c_data<&[u8], ClientMsg>, do_parse!(
-    tag!([cs::DATA]) >>
+    tag!([c::DATA]) >>
     id: id >>
     buf: sized >>
     (ClientMsg::Data(id, buf))
 ));
 
 named!(c_shutdown_write<&[u8], ClientMsg>, do_parse!(
-    tag!([cs::SHUTDOWN_WRITE]) >>
+    tag!([c::SHUTDOWN_WRITE]) >>
     id: id >>
     (ClientMsg::ShutdownWrite(id))
 ));

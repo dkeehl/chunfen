@@ -26,6 +26,7 @@ impl Server {
         let listening = TcpListener::bind(addr).unwrap();
 
         for s in listening.incoming() {
+            // Block. One tunnel at a time.
             if let Ok(stream) = s {
                 Tunnel::new(stream)
             }
@@ -109,13 +110,11 @@ impl Tunnel {
                 self.client.buffer_msg(ServerMsg::HeartBeatRsp);
             },
             ClientMsg::OpenPort(id) => self.ports.add(id),
-            // TODO: If a port action failed, drop the port.
             ClientMsg::Connect(id, buf) => {
-                // FIXME: This is ugly. If parsing failed, it doesn't
-                // response correctly.
-                // Maybe I can merge Connect and ConnectDN.
                 if let Some(addr) = parse_domain_name(buf) {
                     self.ports.connect(id, addr);
+                } else {
+                    self.client.buffer_msg(connection_fail(id));
                 }
             },
             ClientMsg::ConnectDN(id, dn, port) => {
@@ -145,6 +144,10 @@ impl Tunnel {
     }
 }
 
+fn connection_fail(id: Id) -> ServerMsg {
+    ServerMsg::ConnectOK(id, Bytes::new())
+}
+
 struct PortMap {
     // a port is created after it connected.
     ports: HashMap<Id, Option<Sender<ToPort>>>,
@@ -154,6 +157,7 @@ struct PortMap {
 }
 
 impl PortMap {
+    // TODO: If a port action failed, drop the port.
     fn new(sender: Sender<FromPort<ServerMsg>>, handle: Handle) -> PortMap {
         PortMap {
             ports: HashMap::new(),
@@ -175,28 +179,35 @@ impl PortMap {
         let (sender, port) = TunnelPort::new(id, self.sender.clone(), &handle);
         let _ = self.ports.insert(id, Some(sender));
 
-        // Connect in a new thread, to avoid the connect action blocking the
+        // Spawn a new task to connect, to avoid the connect action blocking the
         // main thread.
-        let connect = TcpStream::connect(&addr, &self.handle);
-        let proxing = connect.and_then(move |stream| {
-            let bind_addr = format!("{}", stream.local_addr().unwrap());
-            //println!("{}", bind_addr);
-            let buf = Bytes::from(bind_addr.as_bytes());
-            port.send_raw(ServerMsg::ConnectOK(id, buf));
+        let connect = TcpStream::connect(&addr, &handle);
+        let proxing = connect.then(move |res| {
+            match res {
+                Ok(stream) => {
+                    let bind_addr = format!("{}", stream.local_addr().unwrap());
+                    //println!("{}", bind_addr);
+                    let buf = Bytes::from(bind_addr.as_bytes());
+                    port.send_raw(ServerMsg::ConnectOK(id, buf));
 
-            pipe(stream, port, handle)
+                    Box::new(drop_res!(pipe(stream, port, handle)))
+                        as Box<Future<Item=(), Error=()>>
+                },
+                Err(_) => {
+                    port.send_raw(connection_fail(id));
+                    Box::new(future::ok(())) as Box<Future<Item=(), Error=()>>
+                },
+            }
         });
-
-        self.handle.spawn(drop_res!(proxing));
+        self.handle.spawn(proxing);
     }
 
     fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port) {
         if let Some(addr) = parse_domain_name_with_port(dn, port) {
             self.connect(id, addr);
         } else {
-            let buf = Bytes::new();
             let send = self.sender.clone()
-                .send(FromPort::Payload(ServerMsg::ConnectOK(id, buf)));
+                .send(FromPort::Payload(connection_fail(id)));
             self.handle.spawn(drop_res!(send))
         }
     }
