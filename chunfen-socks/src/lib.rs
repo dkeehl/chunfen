@@ -3,20 +3,25 @@ extern crate tokio_core;
 extern crate tokio_io;
 extern crate bytes;
 
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, ToSocketAddrs};
+use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 use std::vec::Vec;
 use std::convert::From;
-use std::io::{self, Read, Write};
-use std::marker::{Sized};
-use std::str::from_utf8;
+use std::io;
 
 use futures::future;
-use futures::{Future, Poll, Stream};
+use futures::{Future, Stream};
 use tokio_core::net::{TcpStream, TcpListener};
 use tokio_core::reactor::{Handle, Core};
-use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_io::io::{copy, read_exact, write_all,};
+use tokio_io::io::{read_exact, write_all};
 use bytes::{Bytes, BytesMut, BufMut};
+
+mod utils;
+mod connector;
+mod transfer;
+
+pub use crate::connector::{Connector, SimpleConnector};
+pub use crate::transfer::pipe;
+use crate::utils::*;
 
 const SOCKS_V4:u8 = 4;
 const SOCKS_V5:u8 = 5;
@@ -99,27 +104,6 @@ pub struct SocksConnection {
     handle: Handle,
 }
 
-// Open a tcp connection to out bound
-pub trait Connector: AsyncRead + AsyncWrite + 'static + Sized {
-    fn connect(self, addr: &SocketAddrV4, handle: &Handle)
-        -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>;
-
-    fn connect_dn(self, dn: DomainName, port: Port, handle: &Handle)
-        -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
-    {
-        match try_parse_domain_name(dn, port) {
-            Some(SocketAddr::V4(addr)) => Box::new(self.connect(&addr, handle)),
-            Some(_) => unimplemented!(),
-            None => Box::new(future::err(
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid domain name")))
-        }
-    }
-}
-
-fn boxup<T: Future + 'static>(x: T) -> Box<Future<Item=T::Item, Error=T::Error>> {
-    Box::new(x)
-}
-
 impl SocksConnection {
     pub fn new(handle: Handle) -> Self {
         SocksConnection { handle }
@@ -128,6 +112,7 @@ impl SocksConnection {
     pub fn serve<T: Connector>(self, stream: TcpStream, connector: T)
         -> Box<Future<Item = (usize, usize), Error = SocksError>>
     {
+        println!("New socks request");
         let handshaked = start_handshake(stream);
 
         let handle = self.handle.clone();
@@ -149,12 +134,14 @@ impl SocksConnection {
         let res = connected.and_then(|(stream, conn)| {
             match conn {
                 Some((remote, addr)) => {
+                    println!("Remote connected");
                     let resp = Resp::Success(addr);
                     boxup(response(stream, &resp).and_then(|stream| {
                         pipe(stream, remote, handle).map_err(SocksError::IO)
                     }))
                 },
                 None => {
+                    println!("Failed to connect remote");
                     let resp = Resp::Fail;
                     boxup(response(stream, &resp).and_then(|_| {
                         let dummy: (usize, usize) = (0, 0);
@@ -165,33 +152,6 @@ impl SocksConnection {
         });
         boxup(res)
     }
-}
-
-pub fn pipe<T, S>(a: T, b: S, handle: Handle)
-    -> Box<Future<Item = (usize, usize), Error = io::Error>>
-    where
-        T: AsyncRead + AsyncWrite + 'static,
-        S: AsyncRead + AsyncWrite + 'static
-{
-    let (a_read, a_write) = a.split();
-    let (b_read, b_write) = b.split();
-
-    let hdl = handle.clone();
-    let half1 = copy(a_read, b_write)
-        .map(|res| shutdown_and_return(res, hdl));
-    let half2 = copy(b_read, a_write)
-        .map(|res| shutdown_and_return(res, handle));
-    boxup(half1.join(half2))
-}
-
-fn shutdown_and_return<R, W>(res: (u64, R, W), handle: Handle) -> usize where
-    W: AsyncWrite + 'static
-{ 
-    let (n, _, mut wt) = res;
-    let shutdown = future::poll_fn(move || wt.shutdown())
-        .map_err(|_| ());
-    handle.spawn(shutdown);
-    n as usize
 }
 
 fn response(stream: TcpStream, resp: &Resp)
@@ -337,12 +297,6 @@ fn parse_method(x: u8) -> Method {
     }
 }
 
-fn try_parse_domain_name(buf: DomainName, port: Port) -> Option<SocketAddr> {
-    let string = from_utf8(&buf[..]).unwrap_or("");
-    let mut addr = (string, port).to_socket_addrs().unwrap();
-    addr.nth(0)
-}
-
 pub struct Socks5;
 
 impl Socks5 {
@@ -376,62 +330,4 @@ impl Socks5 {
 
         lp.run(server).unwrap()
     }
-}
-
-struct SimpleConnector(Option<TcpStream>);
-
-impl Read for SimpleConnector {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.0 {
-            Some(ref mut rd) => rd.read(buf),
-            None => Err(not_connected()),
-        }
-    }
-}
-
-impl AsyncRead for SimpleConnector {}
-
-impl Write for SimpleConnector {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self.0 {
-            Some(ref mut wt) => wt.write(buf),
-            None => Err(not_connected()),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self.0 {
-            Some(ref mut wt) => wt.flush(),
-            None => Err(not_connected()),
-        }
-    }
-}
-
-impl AsyncWrite for SimpleConnector {
-    fn shutdown(&mut self) -> Poll<(), io::Error> {
-        match self.0 {
-            Some(ref mut wt) => AsyncWrite::shutdown(wt),
-            None => Err(not_connected()),
-        }
-    }
-}
-
-impl Connector for SimpleConnector {
-
-    fn connect(self, addr: &SocketAddrV4, handle: &Handle)
-        -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
-    {
-        let stream = TcpStream::connect(&SocketAddr::V4(*addr), handle)
-            .map(|tcp| {
-                let addr = tcp.local_addr().unwrap();
-                Some((SimpleConnector(Some(tcp)), addr))
-            }).or_else(|_| {
-                future::ok(None)
-            });
-        boxup(stream)
-    }
-}
-
-fn not_connected() -> io::Error {
-    io::Error::new(io::ErrorKind::NotConnected, "not connected")
 }
