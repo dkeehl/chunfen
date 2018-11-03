@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
 use std::marker::PhantomData;
 
 use bytes::{BufMut, BytesMut};
@@ -9,17 +9,18 @@ use nom::Err::Incomplete;
 
 use crate::utils::{Encode, Decode};
 
-pub struct Framed<I, O> {
-    stream: TcpStream,
+pub struct Framed<I, O, S> {
+    stream: S,
     r_buffer: BytesMut,
     w_buffer: BytesMut,
     phantom: PhantomData<(I, O)>,
 }
 
-impl<I, O> Framed<I, O>
-where O: Encode
+impl<I, O, S> Framed<I, O, S>
+where O: Encode,
+      S: AsyncRead + Write
 {
-    pub fn new(stream: TcpStream) -> Framed<I, O> {
+    pub fn new(stream: S) -> Framed<I, O, S> {
         Framed {
             stream,
             r_buffer: BytesMut::new(),
@@ -58,9 +59,10 @@ enum ParseResult<T> {
     Err,
 }
 
-impl<I, O> Stream for Framed<I, O>
+impl<I, O, S> Stream for Framed<I, O, S>
 where I: Decode,
-      O: Encode
+      O: Encode,
+      S: AsyncRead + Write
 {
     type Item = I;
     type Error = io::Error;

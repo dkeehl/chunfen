@@ -1,6 +1,5 @@
 use std::net::{self, SocketAddr, SocketAddrV4, Shutdown, ToSocketAddrs};
 use std::thread;
-//use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
 use std::io::{self, Write, Read};
 use std::collections::HashMap;
 
@@ -13,12 +12,14 @@ use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{BufMut, BytesMut};
 
-use crate::socks::SocksConnection;
-use crate::{DomainName, Port, Id};
+use chunfen_sec::client::ClientSession;
+use chunfen_socks::SocksConnection;
+
 use crate::framed::Framed;
-use crate::utils::{self, Timer};
+use crate::utils::{self, Timer, DomainName, Port, Id};
 use crate::tunnel_port::{ToPort, FromPort, TunnelPort};
 use crate::protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
+use crate::tls;
 
 struct PortMap {
     ports: HashMap<Id, Sender<ToPort>>,
@@ -42,12 +43,17 @@ impl PortMap {
     }
 
     fn send(&self, id: Id, msg: ToPort) {
-        let _ = self.ports.get(&id).map(|v| {
-            let send = v.clone().send(msg);
-            self.handle.spawn(drop_res!(send))
-        });
+        match self.ports.get(&id) {
+            Some(v) => {
+                let send = v.clone().send(msg);
+                self.handle.spawn(drop_res!(send))
+            },
+            None => println!("sending to an nonexist port {}", id),
+        }
     }
 }
+
+type Tls = tls::Tls<ClientSession, TcpStream>;
 
 struct Tunnel {
     // This sender rarely sends messages itself, but is used to be cloned to
@@ -59,24 +65,25 @@ struct Tunnel {
 }
 
 impl Tunnel {
-    pub fn new(server: &str) -> Tunnel {
-        //let addr: SocketAddr = server.parse().unwrap();
+    fn new(server: &str, key: Vec<u8>) -> Tunnel {
         let stream = net::TcpStream::connect(server)
             .expect("can't connect to server");
         let (sender, receiver) = mpsc::channel(1000);
         let cloned_sender = sender.clone();
-        thread::spawn(move || {
-            run_tunnel(stream, cloned_sender, receiver)
+        thread::spawn(|| {
+            run_tunnel(stream, key, cloned_sender, receiver)
         });
 
         Tunnel { sender, count: 0, }
     }
 
-    pub fn new_port(&mut self, handle: &Handle) -> TunnelPort<ClientMsg> {
+    fn new_port(&mut self, handle: &Handle) -> TunnelPort<ClientMsg> {
         let id = self.count;
+        println!("new port {}!", id);
         // Open a channel between the port and the tunnel. The sender is send 
         // to the tunnel, for sending data later to the corresponing port. 
         let (sender, port) = TunnelPort::new(id, self.sender.clone(), handle);
+
         let send = self.sender.clone()
             .send(FromPort::NewPort(id, sender))
             .map(|_| ())
@@ -86,12 +93,12 @@ impl Tunnel {
         port
     }
 
-    fn run(stream: TcpStream,
+    fn run(stream: Tls,
            sender: Sender<FromPort<ClientMsg>>,
            receiver: Receiver<FromPort<ClientMsg>>,
            handle: Handle) -> RunTunnel
     {
-        let server: Framed<ServerMsg, ClientMsg> = Framed::new(stream);
+        let server: Framed<ServerMsg, ClientMsg, Tls> = Framed::new(stream);
         let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64, &handle);
         let ports = PortMap::new(&handle);
         let alive_time = get_time();
@@ -106,20 +113,27 @@ impl Tunnel {
 }
 
 fn run_tunnel(stream: net::TcpStream,
+              key: Vec<u8>,
               sender: Sender<FromPort<ClientMsg>>,
               receiver: Receiver<FromPort<ClientMsg>>)
 {
     let mut lp = Core::new().unwrap();
     let handle = lp.handle();
-    let mut stream = TcpStream::from_stream(stream, &handle).unwrap();
-    let tunnel = Tunnel::run(stream, sender, receiver, handle);
+
+    let tcp = TcpStream::from_stream(stream, &handle).unwrap();
+    let session = ClientSession::new(key);
+
+    let tunnel = tls::connect(session, tcp).and_then(|stream| {
+        Tunnel::run(stream, sender, receiver, handle)
+    });
+
     if let Err(e) = lp.run(tunnel) {
-        println!("an error occured: {}", e);
+        println!("an error occured: {:?}", e);
     }
 }
 
 struct RunTunnel {
-    server: Framed<ServerMsg, ClientMsg>,
+    server: Framed<ServerMsg, ClientMsg, Tls>,
     timer: Timer,
     client: Receiver<FromPort<ClientMsg>>,
 
@@ -161,7 +175,7 @@ impl RunTunnel {
             },
             FromPort::Payload(m) => m,
         };
-        println!("sending {}", c_msg);
+        //println!("sending {}", c_msg);
         self.server.buffer_msg(c_msg);
     }
 }
@@ -212,13 +226,13 @@ impl Future for RunTunnel {
 pub struct Client; 
 
 impl Client {
-    pub fn new(listen_addr: &str, server_addr: &str) {
+    pub fn new(listen_addr: &str, server_addr: &str, key: Vec<u8>) {
         let mut lp = Core::new().unwrap();
         let handle = lp.handle();
         let listen_addr = listen_addr.parse().unwrap();
 
         let listening = TcpListener::bind(&listen_addr, &handle).unwrap();
-        let mut tunnel = Tunnel::new(server_addr);
+        let mut tunnel = Tunnel::new(server_addr, key);
 
         let client = listening.incoming().for_each(move |(stream, _)| {
             // TODO: Quit if tunnel broken

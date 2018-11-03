@@ -3,6 +3,7 @@
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::io::{self, Write, Read};
 use std::str::from_utf8;
+use std::fmt::Debug;
 
 use tokio_core::reactor::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -11,8 +12,9 @@ use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{Bytes, BufMut, BytesMut};
 
-use crate::socks::Connector;
-use crate::{DomainName, Port, Id};
+use chunfen_socks::Connector;
+
+use crate::utils::{DomainName, Port, Id};
 use crate::protocol::ClientMsg;
 
 #[derive(Debug)]
@@ -43,7 +45,7 @@ pub struct TunnelPort<T> {
 }
 
 impl<T> TunnelPort<T>
-where T: 'static
+where T: Debug + 'static
 {
     pub fn new(id: Id, sender: Sender<FromPort<T>>, handle: &Handle)
         -> (Sender<ToPort>, TunnelPort<T>)
@@ -69,8 +71,11 @@ where T: 'static
     }
 
     fn send(&self, msg: FromPort<T>) {
-        let send = self.sender.clone().send(msg);
-        self.handle.spawn(drop_res!(send))
+        let send = self.sender.clone().send(msg)
+            .map(|_| ())
+            .map_err(|e| println!("port failed to send {:?}", e.into_inner()));
+        //self.handle.spawn(drop_res!(send))
+        self.handle.spawn(send)
     }
 }
 
@@ -124,7 +129,7 @@ fn try_get_binded_addr(buf: &[u8]) -> Option<SocketAddr> {
         .and_then(|mut addr_iter| addr_iter.nth(0))
 }
 
-impl<T: 'static> Write for TunnelPort<T> {
+impl<T: Debug + 'static> Write for TunnelPort<T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = buf.len();
         let data = Bytes::from(buf);
@@ -169,7 +174,7 @@ impl<T> Read for TunnelPort<T> {
 
 impl<T> AsyncRead for TunnelPort<T> {}
 
-impl<T: 'static> AsyncWrite for TunnelPort<T> {
+impl<T: Debug + 'static> AsyncWrite for TunnelPort<T> {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         self.send(FromPort::ShutdownWrite(self.id));
         self.send(FromPort::Close(self.id));

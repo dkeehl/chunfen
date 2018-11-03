@@ -3,8 +3,7 @@ use std::fmt;
 use nom::{IResult, Endianness};
 use bytes::{BufMut, BytesMut, Bytes};
 
-use crate::{Id, DomainName, Port};
-use crate::utils::{Encode, Decode};
+use crate::utils::{Id, DomainName, Port, Encode, Decode};
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
 pub const ALIVE_TIMEOUT_TIME_MS: i64 = 60000;

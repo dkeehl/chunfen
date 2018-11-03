@@ -11,7 +11,7 @@ use ring::constant_time;
 pub struct ServerSession {
     common: SessionCommon,
     state: Option<Box<State>>,
-    shared_key: &'static [u8],
+    shared_key: Vec<u8>,
 }
 
 impl Read for ServerSession {
@@ -32,12 +32,12 @@ impl Write for ServerSession {
 }
 
 impl ServerSession {
-    pub fn new(key: &'static str) -> ServerSession {
+    pub fn new(key: &[u8]) -> ServerSession {
         let details = HandshakeDetails::new();
         ServerSession {
             common: SessionCommon::new(),
             state: Some(Box::new(ExpectClientHello { details })),
-            shared_key: key.as_bytes(),
+            shared_key: Vec::from(key),
         }
     }
 
@@ -161,7 +161,7 @@ impl State for ExpectClientHello {
             let suite = session.common.get_suite();
             let hash_alg = suite.get_hash_alg();
             let mut key_schedule = KeySchedule::new(hash_alg);
-            key_schedule.input_secret(&session.shared_key);
+            key_schedule.input_secret(&session.shared_key[..]);
             self.details.start_hash(hash_alg);
             let handshake_hash = self.details.get_current_hash();
             let write_key = key_schedule.derive(SecretKind::ServerTraffic, &handshake_hash);

@@ -7,5 +7,7 @@ fn main() {
 
     let server_addr = "127.0.0.1:10000";
 
-    Client::new(listen_addr, server_addr);
+    let key = b"abc";
+
+    Client::new(listen_addr, server_addr, key.to_vec());
 }

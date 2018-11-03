@@ -9,12 +9,16 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::from_utf8;
 use std::marker::Sized;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio_core::reactor::{Handle, Timeout};
 use futures::{Future, Stream, Poll};
 use nom::IResult;
 
-use crate::{Id, DomainName, Port};
+pub type Id = u32;
+
+pub type DomainName = Bytes;
+
+pub type Port = u16;
 
 macro_rules! drop_res {
     ($fut:expr) => ($fut.map(|_| ()).map_err(|_| ()))

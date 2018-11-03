@@ -3,7 +3,6 @@
 #[macro_use]
 extern crate log;
 extern crate time;
-extern crate ring;
 #[macro_use]
 extern crate futures;
 #[macro_use]
@@ -12,21 +11,12 @@ extern crate tokio_io;
 extern crate bytes;
 #[macro_use]
 extern crate nom;
-extern crate chunfen_socks as socks;
-
-use bytes::Bytes;
 
 #[macro_use]
-pub mod utils;
-pub mod protocol;
-pub mod framed;
-pub mod tunnel_port;
+pub(crate) mod utils;
+pub(crate) mod protocol;
+pub(crate) mod framed;
+pub(crate) mod tunnel_port;
+pub(crate) mod tls;
 pub mod client;
 pub mod server;
-//pub mod security;
-
-type Id = u32;
-
-type DomainName = Bytes;
-
-type Port = u16;

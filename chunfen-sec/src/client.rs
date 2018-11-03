@@ -13,7 +13,7 @@ use crate::rand;
 pub struct ClientSession {
     common: SessionCommon,
     state: Option<Box<State>>,
-    shared_key: &'static [u8],
+    shared_key: Vec<u8>,
 }
 
 impl Read for ClientSession {
@@ -64,11 +64,11 @@ impl Session for ClientSession {
 }
 
 impl ClientSession {
-    pub fn new(key: &'static str) -> ClientSession {
+    pub fn new(key: Vec<u8>) -> ClientSession {
         let mut cs = ClientSession {
             common: SessionCommon::new(),
             state: None,
-            shared_key: key.as_bytes(),
+            shared_key: key,
         };
 
         cs.state = Some(start_handshake(&mut cs));
@@ -206,7 +206,7 @@ impl State for ExpectServerDone {
             let suite = session.common.get_suite();
             let hash_alg = suite.get_hash_alg();
             let mut key_schedule = KeySchedule::new(hash_alg);
-            key_schedule.input_secret(&session.shared_key);
+            key_schedule.input_secret(&session.shared_key[..]);
             self.details.start_hash(hash_alg);
             let handshake_hash = self.details.get_current_hash();
             let write_key = key_schedule.derive(SecretKind::ClientTraffic, &handshake_hash);

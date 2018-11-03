@@ -240,6 +240,7 @@ pub trait Session: Read + Write {
         let mut rlen = 0;
 
         loop {
+            // write to peer
             while self.want_to_write() {
                 wlen += self.write_tls(io)?;
             }
@@ -250,11 +251,12 @@ pub trait Session: Read + Write {
                 return Ok((rlen, wlen))
             }
 
+            // Read peer
             // Reach here either if this is a handshake session, or if
             // we didn't write anything.
             if !eof && self.want_to_read() {
                 match self.read_tls(io)? {
-                    0 => eof = true,
+                    0 => eof = true,  // peer eof
                     n => rlen += n,
                 }
             }
@@ -308,8 +310,6 @@ impl<S: Session, T: Read + Write> Read for SecureStream<S, T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.complete_prior_io()?;
 
-        //while self.session.want_to_read() &&
-        //    self.session.complete_io(&mut self.socket)?.0 != 0 {}
         while self.session.want_to_read() {
             //println!("starting session io");
             let (rlen, wlen) = self.session.complete_io(&mut self.socket)?;
@@ -343,7 +343,6 @@ impl<S: Session, T: Read + Write> Write for SecureStream<S, T> {
         Ok(())
     }
 }
-
 
 struct SessionCommon {
     pub traffic: bool,

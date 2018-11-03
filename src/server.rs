@@ -1,5 +1,5 @@
 use std::net::{self, TcpListener, SocketAddr, SocketAddrV4};
-use std::io::{self, Write};
+use std::io;
 use std::collections::HashMap;
 
 use time::{Timespec, get_time};
@@ -10,59 +10,68 @@ use futures::future;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Receiver, Sender};
 use bytes::{BufMut, BytesMut, Bytes};
-use nom::Err::Incomplete;
 
-use crate::socks::pipe;
-use crate::{Id, DomainName, Port}; 
+use chunfen_sec::server::ServerSession;
+use chunfen_socks::pipe;
+
+use crate::utils::{*, Id, DomainName, Port}; 
 use crate::protocol::{ServerMsg, ClientMsg, ALIVE_TIMEOUT_TIME_MS};
-use crate::utils::*;
 use crate::framed::Framed;
 use crate::tunnel_port::{TunnelPort, FromPort, ToPort};
+use crate::tls;
 
 pub struct Server;
 
 impl Server {
-    pub fn bind(addr: &str) {
+    pub fn bind(addr: &str, key: Vec<u8>) {
         let listening = TcpListener::bind(addr).unwrap();
 
         for s in listening.incoming() {
             // Block. One tunnel at a time.
             if let Ok(stream) = s {
-                Tunnel::new(stream)
+                Tunnel::new(stream, &key[..])
             }
         }
     }
 }
 
+type Tls = tls::Tls<ServerSession, TcpStream>;
+
 struct Tunnel {
-    client: Framed<ClientMsg, ServerMsg>,
+    client: Framed<ClientMsg, ServerMsg, Tls>,
     alive_time: Timespec,
     ports: PortMap,
     connections: Receiver<FromPort<ServerMsg>>,
 }
 
 impl Tunnel {
-    fn new(stream: net::TcpStream) {
+    fn new(stream: net::TcpStream, key: &[u8]) {
         println!("Request from {}, creat new tunnel.",
                  stream.peer_addr().unwrap());
 
         let mut lp = Core::new().unwrap();
         let handle = lp.handle();
 
-        let mut stream = TcpStream::from_stream(stream, &handle).unwrap();
+        let tcp = TcpStream::from_stream(stream, &handle).unwrap();
+        let session = ServerSession::new(key);
         let (sender, receiver) = mpsc::channel(1000);
 
-        let tunnel = Tunnel {
-            client: Framed::new(stream),
-            alive_time: get_time(),
-            ports: PortMap::new(sender, handle),
-            connections: receiver,
-        };
+        let tunnel = tls::connect(session, tcp).and_then(|stream| {
+            Tunnel {
+                client: Framed::new(stream),
+                alive_time: get_time(),
+                ports: PortMap::new(sender, handle),
+                connections: receiver,
+            }
+        }).then(|res| {
+            match res {
+                Ok(_) => println!("peer at eof, quit"),
+                Err(e) => println!("an error occured: {}, tunnel broken", e),
+            }
+            future::ok::<(), ()>(())
+        });
 
-        match lp.run(tunnel) {
-            Ok(_) => println!("peer at eof, quit"),
-            Err(e) => println!("an error occured: {}, tunnel broken", e),
-        }
+        lp.run(tunnel).unwrap()
     }
 }
 
