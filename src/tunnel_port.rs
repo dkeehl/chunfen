@@ -12,7 +12,7 @@ use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::{Bytes, BufMut, BytesMut};
 
-use chunfen_socks::Connector;
+use chunfen_socks::{ShutdownWrite, Connector};
 
 use crate::utils::{DomainName, Port, Id};
 use crate::protocol::ClientMsg;
@@ -105,6 +105,8 @@ impl<T> Future for PortConnectFuture<T> {
 }
 
 impl Connector for TunnelPort<ClientMsg> {
+    type Remote = Self;
+
     fn connect(self, addr: &SocketAddrV4, _: &Handle)
         -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
@@ -178,15 +180,14 @@ impl<T: Debug + 'static> AsyncWrite for TunnelPort<T> {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         self.send(FromPort::ShutdownWrite(self.id));
         self.send(FromPort::Close(self.id));
-        Ok(Async::Ready(()))
+        Ok(().into())
     }
 }
 
-/*
-impl<T: 'static> Drop for TunnelPort<T> {
-    fn drop(&mut self) {
+impl<T: Debug + 'static> ShutdownWrite for TunnelPort<T> {
+    fn shutdown_write(&mut self) -> io::Result<()> {
         self.send(FromPort::ShutdownWrite(self.id));
         self.send(FromPort::Close(self.id));
+        Ok(())
     }
 }
-*/

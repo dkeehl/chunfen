@@ -1,3 +1,4 @@
+#[macro_use]
 extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
@@ -20,7 +21,7 @@ mod connector;
 mod transfer;
 
 pub use crate::connector::{Connector, SimpleConnector};
-pub use crate::transfer::pipe;
+pub use crate::transfer::{ShutdownWrite, pipe};
 use crate::utils::*;
 
 const SOCKS_V4:u8 = 4;
@@ -109,10 +110,11 @@ impl SocksConnection {
         SocksConnection { handle }
     }
 
-    pub fn serve<T: Connector>(self, stream: TcpStream, connector: T)
+    pub fn serve<T>(self, stream: TcpStream, connector: T)
         -> Box<Future<Item = (usize, usize), Error = SocksError>>
+        where T: Connector + 'static
     {
-        println!("New socks request");
+        //println!("New socks request");
         let handshaked = start_handshake(stream);
 
         let handle = self.handle.clone();
@@ -134,7 +136,7 @@ impl SocksConnection {
         let res = connected.and_then(|(stream, conn)| {
             match conn {
                 Some((remote, addr)) => {
-                    println!("Remote connected");
+                    //println!("Remote connected");
                     let resp = Resp::Success(addr);
                     boxup(response(stream, &resp).and_then(|stream| {
                         pipe(stream, remote, handle).map_err(SocksError::IO)
@@ -311,7 +313,7 @@ impl Socks5 {
             (SocksConnection {
                 //buffer: buffer.clone(),
                 handle: handle.clone(),
-            }.serve(stream, SimpleConnector(None)), addr)
+            }.serve(stream, SimpleConnector), addr)
         });
 
         let handle = lp.handle();

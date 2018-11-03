@@ -1,37 +1,84 @@
 use std::io;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::net::Shutdown;
 
-use futures::future;
-use futures::Future;
+use futures::{Poll, Future};
 use tokio_core::reactor::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_io::io::copy;
+use tokio_core::net::TcpStream;
+use bytes::BytesMut;
 
 use crate::utils::boxup;
 
-pub fn pipe<T, S>(a: T, b: S, handle: Handle)
+pub fn pipe<T, S>(a: T, b: S, _handle: Handle)
     -> Box<Future<Item = (usize, usize), Error = io::Error>>
     where
-        T: AsyncRead + AsyncWrite + 'static,
-        S: AsyncRead + AsyncWrite + 'static
+        T: AsyncRead + AsyncWrite + ShutdownWrite + 'static,
+        S: AsyncRead + AsyncWrite + ShutdownWrite + 'static
 {
-    let (a_read, a_write) = a.split();
-    let (b_read, b_write) = b.split();
+    let r1 = Rc::new(RefCell::new(a));
+    let w1 = Rc::new(RefCell::new(b));
+    let r2 = w1.clone();
+    let w2 = r1.clone();
 
-    let hdl = handle.clone();
-    let half1 = copy(a_read, b_write)
-        .map(|res| shutdown_and_return(res, hdl));
-    let half2 = copy(b_read, a_write)
-        .map(|res| shutdown_and_return(res, handle));
+    let half1 = transfer(r1, w1);
+    let half2 = transfer(r2, w2);
     boxup(half1.join(half2))
 }
 
-fn shutdown_and_return<R, W>(res: (u64, R, W), handle: Handle) -> usize where
-    W: AsyncWrite + 'static
-{ 
-    let (n, _, mut wt) = res;
-    let shutdown = future::poll_fn(move || wt.shutdown())
-        .map_err(|_| ());
-    handle.spawn(shutdown);
-    n as usize
+fn transfer<R, W>(reader: Rc<RefCell<R>>, writer: Rc<RefCell<W>>) -> Transfer<R, W>
+    where R: AsyncRead + 'static,
+          W: AsyncWrite + ShutdownWrite + 'static
+{
+    Transfer {
+        reader,
+        writer,
+        buffer: BytesMut::new(),
+        wlen: 0,
+    }
 }
 
+struct Transfer<R, W> {
+    reader: Rc<RefCell<R>>,
+    writer: Rc<RefCell<W>>,
+    buffer: BytesMut,
+    wlen: usize,
+}
+
+impl<R, W> Future for Transfer<R, W>
+where R: AsyncRead + 'static,
+      W: AsyncWrite + ShutdownWrite + 'static
+{
+    type Item = usize;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<usize, io::Error> {
+        loop {
+            if self.buffer.is_empty() {
+                self.buffer.reserve(1024);
+                let n = try_ready!(
+                    self.reader.borrow_mut().read_buf(&mut self.buffer));
+                if n == 0 {
+                    let _ = self.writer.borrow_mut().shutdown_write()?;
+                    return Ok(self.wlen.into())
+                }
+            }
+
+            let n = try_ready!(self.writer.borrow_mut().poll_write(&self.buffer));
+            assert!(n > 0);
+            self.buffer.advance(n);
+            self.wlen += n;
+        }
+    }
+}
+
+pub trait ShutdownWrite {
+    fn shutdown_write(&mut self) -> io::Result<()>;
+}
+
+impl ShutdownWrite for TcpStream {
+    fn shutdown_write(&mut self) -> io::Result<()> {
+        TcpStream::shutdown(self, Shutdown::Write)
+    }
+}
