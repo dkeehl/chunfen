@@ -2,13 +2,13 @@ use std::io::{self, Read, Write};
 
 use ring::constant_time;
 
-use crate::{Session, SessionCommon, PlainText, TLSError, ContentType,
-    AlertDescription, };
+use crate::data::{PlainText, TLSError, ContentType};
+use crate::session::{Session, SessionCommon};
 use crate::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,};
 use crate::key_schedule::{SecretKind, KeySchedule,};
 use crate::encryption::{MsgEncryptor, MsgDecryptor,};
-use crate::codec::Codec;
-use crate::rand;
+use crate::utils::rand;
+use crate::utils::codec::Codec;
 
 pub struct ClientSession {
     common: SessionCommon,
@@ -55,7 +55,7 @@ impl Session for ClientSession {
     }
 
     fn process_new_packets(&mut self) -> Result<(), TLSError> {
-        while let Some(msg) = self.common.msg_deframer.frames.pop_front() {
+        while let Some(msg) = self.common.msg_deframer.pop_front() {
             let msg = self.common.decrypt_incoming(msg)?;
             self.process_msg(msg)?
         }
@@ -64,11 +64,11 @@ impl Session for ClientSession {
 }
 
 impl ClientSession {
-    pub fn new(key: Vec<u8>) -> ClientSession {
+    pub fn new(key: &[u8]) -> ClientSession {
         let mut cs = ClientSession {
             common: SessionCommon::new(),
             state: None,
-            shared_key: key,
+            shared_key: Vec::from(key),
         };
 
         cs.state = Some(start_handshake(&mut cs));
@@ -156,7 +156,7 @@ impl ExpectServerHello {
 }
 
 impl State for ExpectServerHello {
-    fn handle(mut self: Box<Self>, session: &mut ClientSession, msg: PlainText)
+    fn handle(mut self: Box<Self>, _session: &mut ClientSession, msg: PlainText)
         -> NextStateOrError
     {
         if let Handshake::ServerHello(_) = extract_handshake(&msg)? {
@@ -275,7 +275,7 @@ impl State for ExpectFinished {
 struct ExpectTraffic;
 
 impl State for ExpectTraffic {
-    fn handle(mut self: Box<Self>, session: &mut ClientSession, msg: PlainText)
+    fn handle(self: Box<Self>, session: &mut ClientSession, msg: PlainText)
         -> NextStateOrError
     {
         if let PlainText { content_type: ContentType::ApplicationData, fragment } = msg {

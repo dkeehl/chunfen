@@ -1,8 +1,9 @@
-use super::{Session, SecureStream};
-use super::client::ClientSession;
-use super::server::ServerSession;
-use super::rand;
-use std::net::{TcpStream, TcpListener, Shutdown};
+use crate::session::Session;
+use crate::stream::SecureStream;
+use crate::client::ClientSession;
+use crate::server::ServerSession;
+use crate::utils::rand;
+use std::net::{TcpStream, TcpListener};
 use std::io::{Read, Write};
 use std::thread;
 
@@ -29,13 +30,13 @@ impl SimpleLogger {
 }
 
 const HOST: &str = "127.0.0.1";
-const SHAREKEY: &str = "testkey";
+const SHAREKEY: &[u8]= b"testkey";
 
 #[test]
 fn test_secure_stream() {
     let port: u16 = 10000;
     thread::spawn(move || run_server(port));
-    for i in 0..5 {
+    for _ in 0..5 {
         let mut req = vec![0u8; 100];
         rand::fill_random(&mut req[..]);
         let resp = run_client(port, &req);

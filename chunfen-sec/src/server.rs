@@ -1,11 +1,12 @@
 use std::io::{self, Read, Write};
 
-use crate::{Session, SessionCommon, PlainText, TLSError, ContentType,};
+use crate::data::{PlainText, TLSError, ContentType};
+use crate::session::{Session, SessionCommon};
 use crate::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,};
 use crate::key_schedule::{SecretKind, KeySchedule,};
 use crate::encryption::{MsgEncryptor, MsgDecryptor,};
-use crate::codec::Codec;
-use crate::rand;
+use crate::utils::rand;
+use crate::utils::codec::Codec;
 use ring::constant_time;
 
 pub struct ServerSession {
@@ -93,7 +94,7 @@ impl Session for ServerSession {
     }
 
     fn process_new_packets(&mut self) -> Result<(), TLSError> {
-        while let Some(msg) = self.common.msg_deframer.frames.pop_front() {
+        while let Some(msg) = self.common.msg_deframer.pop_front() {
             let msg = self.common.decrypt_incoming(msg)?;
             self.process_msg(msg)?
         }
@@ -151,7 +152,7 @@ impl State for ExpectClientHello {
     fn handle(mut self: Box<Self>, session: &mut ServerSession, msg: PlainText)
         -> NextStateOrError
     {
-        if let Handshake::ClientHello(random) = extract_handshake(&msg)? {
+        if let Handshake::ClientHello(_) = extract_handshake(&msg)? {
             trace!("Got a client hello");
             self.details.add_message(&msg);
             trace!("Sending server hello");
@@ -247,7 +248,7 @@ impl State for ExpectFinished {
 struct ExpectTraffic;
 
 impl State for ExpectTraffic {
-    fn handle(mut self: Box<Self>, session: &mut ServerSession, msg: PlainText)
+    fn handle(self: Box<Self>, session: &mut ServerSession, msg: PlainText)
         -> NextStateOrError
     {
         if let PlainText { content_type: ContentType::ApplicationData,

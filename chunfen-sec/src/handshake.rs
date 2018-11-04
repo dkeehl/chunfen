@@ -1,6 +1,5 @@
-use std::io::Write;
-use crate::{ContentType, PlainText, TLSError,};
-use crate::codec::{Reader, Codec, self,};
+use crate::data::{ContentType, PlainText, TLSError,};
+use crate::utils::codec::{Reader, Codec, self,};
 
 use ring::digest;
 
@@ -46,37 +45,6 @@ impl Codec for Random {
         })
     }
 }
-
-impl Random {
-    pub fn from_slice(bytes: &[u8]) -> Random {
-        let mut rd = Reader::init(bytes);
-        Random::read(&mut rd).unwrap()
-    }
-
-    //pub fn write_slice(&self, mut bytes: &[u8]) {
-    //    let buf = self.get_encoding();
-    //    bytes.write_all(&buf).unwrap();
-    //}
-}
-
-/*
-pub struct HelloPayload {
-    pub random: Random,
-    pub hash: Hash,
-}
-
-impl Codec for HelloPayload {
-    fn encode(&self, bytes: &mut Vec<u8>) {
-        self.random.encode(bytes);
-        bytes.extend_from_slice(&self.hash);
-    }
-
-    fn read(r: &mut Reader) -> Option<HelloPayload> {
-        Random::read(r).map(|random|
-            HelloPayload { random, hash: r.rest().to_vec() })
-    }
-}
-*/
 
 #[derive(Debug)]
 pub enum Handshake {
@@ -252,5 +220,3 @@ impl HandshakeHash {
         vec
     }
 }
-
-

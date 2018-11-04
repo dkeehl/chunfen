@@ -1,8 +1,8 @@
 use std::io::Write;
-use crate::{PlainText, CipherText, ContentType, Encrypted,
+use crate::data::{PlainText, CipherText, ContentType, Encrypted,
     BorrowedMessage, TLSError,};
-use crate::codec::{self, Codec};
-use crate::fragmenter::MAX_FRAGMENT_LEN;
+use crate::utils::codec::{self, Codec};
+use crate::utils::fragmenter::MAX_FRAGMENT_LEN;
 use crate::key_schedule::{derive_traffic_key, derive_traffic_iv};
 use crate::suites::SupportedCipherSuite;
 use ring;
@@ -18,7 +18,7 @@ pub trait MsgDecryptor {
 pub struct NoEncryption;
 
 impl MsgEncryptor for NoEncryption {
-    fn encrypt(&self, m: BorrowedMessage, seq: u64) -> Result<CipherText, TLSError> {
+    fn encrypt(&self, m: BorrowedMessage, _seq: u64) -> Result<CipherText, TLSError> {
         let BorrowedMessage { ty, fragment } = m;
         let buf = Encrypted::mark(fragment.to_vec());
         Ok(CipherText { content_type: ty, fragment: buf })
@@ -26,7 +26,7 @@ impl MsgEncryptor for NoEncryption {
 }
 
 impl MsgDecryptor for NoEncryption {
-    fn decrypt(&self, m: CipherText, seq: u64) -> Result<PlainText, TLSError> {
+    fn decrypt(&self, m: CipherText, _seq: u64) -> Result<PlainText, TLSError> {
         let CipherText { content_type, fragment } = m;
         Ok(PlainText { content_type, fragment: fragment.extract()})
     }
@@ -152,7 +152,7 @@ fn unpad_tls13(v: &mut Vec<u8>) -> ContentType {
 }
 
 impl MsgDecryptor for TLS13MessageDecrypter {
-    fn decrypt(&self, mut msg: CipherText, seq: u64) -> Result<PlainText, TLSError> {
+    fn decrypt(&self, msg: CipherText, seq: u64) -> Result<PlainText, TLSError> {
         let mut nonce = [0u8; 12];
         codec::put_u64(seq, &mut nonce[4..]);
         xor(&mut nonce, &self.dec_offset);
@@ -193,9 +193,9 @@ impl MsgDecryptor for TLS13MessageDecrypter {
 #[cfg(test)]
 mod test {
     use std::vec::Vec;
-    use crate::rand;
-    use crate::{PlainText, ContentType};
-    use crate::codec::Codec;
+    use crate::utils::rand;
+    use crate::data::{PlainText, ContentType};
+    use crate::utils::codec::Codec;
     use super::{MsgEncryptor, MsgDecryptor};
     use crate::suites::TLS13_AES_128_GCM_SHA256;
 
