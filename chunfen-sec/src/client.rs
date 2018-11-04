@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 
 use ring::constant_time;
 
-use crate::data::{PlainText, TLSError, ContentType};
+use crate::data::{PlainText, TLSError, ContentType, AlertDescription};
 use crate::session::{Session, SessionCommon};
 use crate::handshake::{Handshake, HandshakeDetails, extract_handshake, Hash,};
 use crate::key_schedule::{SecretKind, KeySchedule,};
@@ -10,58 +10,7 @@ use crate::encryption::{MsgEncryptor, MsgDecryptor,};
 use crate::utils::rand;
 use crate::utils::codec::Codec;
 
-pub struct ClientSession {
-    common: SessionCommon,
-    state: Option<Box<State>>,
-    shared_key: Vec<u8>,
-}
-
-impl Read for ClientSession {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.common.read(buf)
-    }
-}
-
-impl Write for ClientSession {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.common.send_plaintext(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.common.flush_plaintext();
-        Ok(())
-    }
-}
-
-impl Session for ClientSession {
-    fn read_tls(&mut self, r: &mut Read) -> Result<usize, io::Error> {
-        self.common.read_tls(r)
-    }
-
-    fn write_tls(&mut self, w: &mut Write) -> Result<usize, io::Error> {
-        self.common.write_tls(w)
-    }
-
-    fn is_handshaking(&self) -> bool {
-        !self.common.traffic
-    }
-
-    fn want_to_write(&self) -> bool {
-        !self.common.sendable_tls.is_empty()
-    }
-
-    fn want_to_read(&self) -> bool {
-        !self.common.has_readable_plaintext()
-    }
-
-    fn process_new_packets(&mut self) -> Result<(), TLSError> {
-        while let Some(msg) = self.common.msg_deframer.pop_front() {
-            let msg = self.common.decrypt_incoming(msg)?;
-            self.process_msg(msg)?
-        }
-        Ok(())
-    }
-}
+impl_session!(ClientSession, State);
 
 impl ClientSession {
     pub fn new(key: &[u8]) -> ClientSession {
@@ -73,44 +22,6 @@ impl ClientSession {
 
         cs.state = Some(start_handshake(&mut cs));
         cs
-    }
-
-    fn take_received_plaintext(&mut self, bytes: Vec<u8>) {
-        self.common.take_received_plaintext(bytes)
-    }
-
-    fn send_close_notify(&mut self) {
-        self.common.send_close_notify()
-    }
-
-    fn send_msg(&mut self, msg: PlainText) {
-        self.common.send_msg(msg)
-    }
-
-    fn get_key_schedule(&self) -> &KeySchedule {
-        self.common.get_key_schedule()
-    }
-
-    fn process_msg(&mut self, msg: PlainText) -> Result<(), TLSError> {
-        match msg.content_type {
-            ContentType::Alert => self.common.process_alert(msg),
-
-            _ => self.process_main_protocol(msg),
-        }
-    }
-
-    fn process_main_protocol(&mut self, msg: PlainText) -> Result<(), TLSError> {
-        let state = self.state.take().unwrap();
-        match state.handle(self, msg) {
-            Ok(new_state) => {
-                self.state = Some(new_state);
-                Ok(())
-            },
-            Err(e) => {
-                self.send_close_notify();
-                Err(e)
-            }
-        }
     }
 }
 
@@ -182,7 +93,7 @@ impl ExpectServerDone {
     fn emit_finished(&mut self, session: &mut ClientSession) {
         let handshake_hash = self.details.get_current_hash();
         let verify_data =
-            session.get_key_schedule()
+            session.common.get_key_schedule()
                    .sign_finish(SecretKind::ClientTraffic, &handshake_hash);
         let mut fragment = Vec::new();
         Handshake::Finished(verify_data).encode(&mut fragment);
@@ -279,7 +190,7 @@ impl State for ExpectTraffic {
         -> NextStateOrError
     {
         if let PlainText { content_type: ContentType::ApplicationData, fragment } = msg {
-            session.take_received_plaintext(fragment);
+            session.common.take_received_plaintext(fragment);
             Ok(self)
         } else {
             warn!("unexpected message, expect application data");

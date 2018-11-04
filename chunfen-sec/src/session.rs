@@ -22,7 +22,7 @@ pub trait Session: Read + Write {
 
     fn process_new_packets(&mut self) -> Result<(), TLSError>;
 
-    //fn send_close_notify(&mut self);
+    fn send_close_notify(&mut self);
 
     fn complete_io<T>(&mut self, io: &mut T)
         -> Result<(usize, usize), io::Error> where T: Read + Write
@@ -84,7 +84,7 @@ pub struct SessionCommon {
     // Incoming: msg_deframer -> received_plaintext
     sendable_plaintext: VecBuffer,  // application data, raw
     pub sendable_tls: VecBuffer,    // raw data
-    received_plaintext: VecBuffer,  // application data, raw
+    pub received_plaintext: VecBuffer,  // application data, raw
 
     // Buffers incoiming tls cipher text, parsed
     pub msg_deframer: MsgDeframer,
@@ -120,10 +120,6 @@ impl SessionCommon {
             suite: Some(&TLS13_AES_128_GCM_SHA256), 
             key_schedule: None,
         }
-    }
-
-    pub fn has_readable_plaintext(&self) -> bool {
-        !self.received_plaintext.is_empty()
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -174,14 +170,6 @@ impl SessionCommon {
         }
     }
 
-    pub fn read_tls(&mut self, r: &mut Read) -> Result<usize, io::Error> {
-        self.msg_deframer.read_from(r)
-    }
-
-    pub fn write_tls(&mut self, w: &mut Write) -> Result<usize, io::Error> {
-        self.sendable_tls.write_to(w)
-    }
-
     pub fn take_received_plaintext(&mut self, bytes: Vec<u8>) {
         self.received_plaintext.append(bytes);
     }
@@ -193,7 +181,7 @@ impl SessionCommon {
         self.msg_decryptor.decrypt(msg, seq)
     }
 
-    pub fn encrypt_outgoing(&mut self, plain: BorrowedMessage) -> CipherText {
+    fn encrypt_outgoing(&mut self, plain: BorrowedMessage) -> CipherText {
         let seq = self.write_seq;
         self.write_seq += 1;
         self.msg_encryptor.encrypt(plain, seq).unwrap()
@@ -227,10 +215,6 @@ impl SessionCommon {
         }
     }
 
-    pub fn send_close_notify(&mut self) {
-        self.send_alert(AlertDescription::CloseNotify)
-    }
-
     pub fn start_traffic(&mut self) { self.traffic = true }
 
     pub fn set_key_schedule(&mut self, ks: KeySchedule) {
@@ -251,6 +235,95 @@ impl SessionCommon {
 
     pub fn set_msg_decryptor(&mut self, dec: Box<MsgDecryptor>) {
         self.msg_decryptor = dec;
+    }
+}
+
+macro_rules! impl_session {
+    ($session: ident, $state: ty) => {
+        pub struct $session {
+            common: SessionCommon,
+            state: Option<Box<$state>>,
+            shared_key: Vec<u8>
+        }
+
+        impl $session {
+            fn send_msg(&mut self, msg: PlainText) {
+                self.common.send_msg(msg)
+            }
+
+            fn process_msg(&mut self, msg: PlainText) -> Result<(), TLSError> {
+                match msg.content_type {
+                    ContentType::Alert => self.common.process_alert(msg),
+
+                    _ => self.process_main_protocol(msg),
+                }
+            }
+
+            fn process_main_protocol(&mut self, msg: PlainText) -> Result<(), TLSError> {
+                let state = self.state.take().unwrap();
+                match state.handle(self, msg) {
+                    Ok(new_state) => {
+                        self.state = Some(new_state);
+                        Ok(())
+                    },
+                    Err(e) => {
+                        self.send_close_notify();
+                        Err(e)
+                    }
+                }
+            }
+        }
+
+        impl Read for $session {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.common.read(buf)
+            }
+        }
+
+        impl Write for $session {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.common.send_plaintext(buf)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.common.flush_plaintext();
+                Ok(())
+            }
+        }
+
+        impl Session for $session {
+            fn read_tls(&mut self, r: &mut Read) -> Result<usize, io::Error> {
+                self.common.msg_deframer.read_from(r)
+            }
+
+            fn write_tls(&mut self, w: &mut Write) -> Result<usize, io::Error> {
+                self.common.sendable_tls.write_to(w)
+            }
+
+            fn is_handshaking(&self) -> bool {
+                !self.common.traffic
+            }
+
+            fn send_close_notify(&mut self) {
+                self.common.send_alert(AlertDescription::CloseNotify)
+            }
+
+            fn want_to_write(&self) -> bool {
+                !self.common.sendable_tls.is_empty()
+            }
+
+            fn want_to_read(&self) -> bool {
+                self.common.received_plaintext.is_empty()
+            }
+
+            fn process_new_packets(&mut self) -> Result<(), TLSError> {
+                while let Some(msg) = self.common.msg_deframer.pop_front() {
+                    let msg = self.common.decrypt_incoming(msg)?;
+                    self.process_msg(msg)?
+                }
+                Ok(())
+            }
+        }
     }
 }
 

@@ -6,17 +6,18 @@ extern crate ring;
 #[macro_use]
 mod macros;
 
-pub mod stream;
-pub mod client;
-pub mod server;
-
 mod data;
+#[macro_use]
 mod session;
 mod encryption;
 mod handshake;
 mod key_schedule;
 mod suites;
 mod utils;
+
+pub mod stream;
+pub mod client;
+pub mod server;
 
 #[cfg(test)]
 mod test;
