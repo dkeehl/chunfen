@@ -6,7 +6,7 @@ use futures::future;
 use futures::Future;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::AsyncRead;
 
 use crate::{DomainName, Port};
 use crate::transfer::ShutdownWrite;
@@ -14,7 +14,7 @@ use crate::utils::*;
 
 // Open a tcp connection to out bound
 pub trait Connector: Sized {
-    type Remote: AsyncRead + AsyncWrite + ShutdownWrite + 'static;
+    type Remote: AsyncRead + io::Write + ShutdownWrite + 'static;
 
     fn connect(self, addr: &SocketAddrV4, handle: &Handle)
         -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error>>;

@@ -175,7 +175,7 @@ impl<T> Read for TunnelPort<T> {
 }
 
 impl<T> AsyncRead for TunnelPort<T> {}
-
+/*
 impl<T: Debug + 'static> AsyncWrite for TunnelPort<T> {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         self.send(FromPort::ShutdownWrite(self.id));
@@ -183,7 +183,7 @@ impl<T: Debug + 'static> AsyncWrite for TunnelPort<T> {
         Ok(().into())
     }
 }
-
+*/
 impl<T: Debug + 'static> ShutdownWrite for TunnelPort<T> {
     fn shutdown_write(&mut self) -> io::Result<()> {
         self.send(FromPort::ShutdownWrite(self.id));

@@ -4,18 +4,17 @@ use std::cell::RefCell;
 use std::net::Shutdown;
 
 use futures::{Poll, Future};
-use tokio_core::reactor::Handle;
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::AsyncRead;
 use tokio_core::net::TcpStream;
 use bytes::BytesMut;
 
 use crate::utils::boxup;
 
-pub fn pipe<T, S>(a: T, b: S, _handle: Handle)
+pub fn pipe<T, S>(a: T, b: S)
     -> Box<Future<Item = (usize, usize), Error = io::Error>>
     where
-        T: AsyncRead + AsyncWrite + ShutdownWrite + 'static,
-        S: AsyncRead + AsyncWrite + ShutdownWrite + 'static
+        T: AsyncRead + io::Write + ShutdownWrite + 'static,
+        S: AsyncRead + io::Write + ShutdownWrite + 'static
 {
     let r1 = Rc::new(RefCell::new(a));
     let w1 = Rc::new(RefCell::new(b));
@@ -29,12 +28,13 @@ pub fn pipe<T, S>(a: T, b: S, _handle: Handle)
 
 fn transfer<R, W>(reader: Rc<RefCell<R>>, writer: Rc<RefCell<W>>) -> Transfer<R, W>
     where R: AsyncRead + 'static,
-          W: AsyncWrite + ShutdownWrite + 'static
+          W: io::Write + ShutdownWrite + 'static
 {
     Transfer {
         reader,
         writer,
         buffer: BytesMut::new(),
+        closing: false,
         wlen: 0,
     }
 }
@@ -43,29 +43,35 @@ struct Transfer<R, W> {
     reader: Rc<RefCell<R>>,
     writer: Rc<RefCell<W>>,
     buffer: BytesMut,
+    closing: bool,
     wlen: usize,
 }
 
 impl<R, W> Future for Transfer<R, W>
 where R: AsyncRead + 'static,
-      W: AsyncWrite + ShutdownWrite + 'static
+      W: io::Write + ShutdownWrite + 'static
 {
     type Item = usize;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<usize, io::Error> {
         loop {
+            if self.closing {
+                try_nb!(self.writer.borrow_mut().shutdown_write());
+                return Ok(self.wlen.into())
+            }
+
             if self.buffer.is_empty() {
                 self.buffer.reserve(1024);
                 let n = try_ready!(
                     self.reader.borrow_mut().read_buf(&mut self.buffer));
                 if n == 0 {
-                    let _ = self.writer.borrow_mut().shutdown_write()?;
-                    return Ok(self.wlen.into())
+                    self.closing = true;
+                    continue
                 }
             }
 
-            let n = try_ready!(self.writer.borrow_mut().poll_write(&self.buffer));
+            let n = try_nb!(self.writer.borrow_mut().write(&self.buffer));
             assert!(n > 0);
             self.buffer.advance(n);
             self.wlen += n;

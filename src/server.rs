@@ -199,7 +199,7 @@ impl PortMap {
                     let buf = Bytes::from(bind_addr.as_bytes());
                     port.send_raw(ServerMsg::ConnectOK(id, buf));
 
-                    Box::new(drop_res!(pipe(stream, port, handle)))
+                    Box::new(drop_res!(pipe(stream, port)))
                         as Box<Future<Item=(), Error=()>>
                 },
                 Err(_) => {
@@ -208,7 +208,7 @@ impl PortMap {
                 },
             }
         });
-        self.handle.spawn(proxing);
+        handle.spawn(proxing);
     }
 
     fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port) {

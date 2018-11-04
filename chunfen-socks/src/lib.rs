@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate futures;
+#[macro_use]
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate bytes;
@@ -132,14 +133,13 @@ impl SocksConnection {
             }.map(|conn| (stream, conn)).map_err(SocksError::IO)
         });
 
-        let handle = self.handle.clone();
         let res = connected.and_then(|(stream, conn)| {
             match conn {
                 Some((remote, addr)) => {
                     //println!("Remote connected");
                     let resp = Resp::Success(addr);
                     boxup(response(stream, &resp).and_then(|stream| {
-                        pipe(stream, remote, handle).map_err(SocksError::IO)
+                        pipe(stream, remote).map_err(SocksError::IO)
                     }))
                 },
                 None => {
