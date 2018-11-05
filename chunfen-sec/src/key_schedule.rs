@@ -1,12 +1,10 @@
-use security::AlertDescription;
-use security::codec::Codec;
+use crate::utils::codec::Codec;
 
 use ring::{hmac, digest, hkdf};
 
 pub struct KeySchedule {
     current: hmac::SigningKey,
     hash_alg: &'static digest::Algorithm,
-    hash_of_empty_message: [u8; digest::MAX_OUTPUT_LEN],
     pub current_client_traffic_secret: Vec<u8>,
     pub current_server_traffic_secret: Vec<u8>,
 }
@@ -15,14 +13,9 @@ impl KeySchedule {
     pub fn new(hash: &'static digest::Algorithm) -> KeySchedule {
         let zeroes = [0u8; digest::MAX_OUTPUT_LEN];
 
-        let mut empty_hash = [0u8; digest::MAX_OUTPUT_LEN];
-        empty_hash[..hash.output_len]
-            .clone_from_slice(digest::digest(hash, &[]).as_ref());
-
         KeySchedule {
             current: hmac::SigningKey::new(hash, &zeroes[..hash.output_len]),
             hash_alg: hash,
-            hash_of_empty_message: empty_hash,
             current_server_traffic_secret: Vec::new(),
             current_client_traffic_secret: Vec::new(),
         }

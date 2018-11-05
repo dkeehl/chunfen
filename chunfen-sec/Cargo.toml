@@ -1,0 +1,9 @@
+[package]
+name = "chunfen-sec"
+version = "0.1.0"
+authors = ["Thomas Lin <dkeehl@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+log = { version = "*", features = ["std"] }
+ring = "0.12.0"
