@@ -48,7 +48,7 @@ impl PortMap {
                 let send = v.clone().send(msg);
                 self.handle.spawn(drop_res!(send))
             },
-            None => println!("sending to an nonexist port {}", id),
+            None => info!("sending to an nonexist port {}", id),
         }
     }
 }
@@ -79,7 +79,7 @@ impl Tunnel {
 
     fn new_port(&mut self, handle: &Handle) -> TunnelPort<ClientMsg> {
         let id = self.count;
-        println!("new port {}!", id);
+        //println!("new port {}!", id);
         // Open a channel between the port and the tunnel. The sender is send 
         // to the tunnel, for sending data later to the corresponing port. 
         let (sender, port) = TunnelPort::new(id, self.sender.clone(), handle);
@@ -121,7 +121,7 @@ fn run_tunnel(stream: net::TcpStream,
     let handle = lp.handle();
 
     let tcp = TcpStream::from_stream(stream, &handle).unwrap();
-    let session = ClientSession::new(key);
+    let session = ClientSession::new(&key[..]);
 
     let tunnel = tls::connect(session, tcp).and_then(|stream| {
         Tunnel::run(stream, sender, receiver, handle)
@@ -143,7 +143,6 @@ struct RunTunnel {
 
 impl RunTunnel {
     fn process_server_msg(&mut self, s_msg: ServerMsg) {
-        //println!("get server message: {}", s_msg);
         match s_msg {
             ServerMsg::HeartBeatRsp => {},
 
@@ -173,7 +172,12 @@ impl RunTunnel {
                 self.ports.remove(id);
                 ClientMsg::ClosePort(id)
             },
-            FromPort::Payload(m) => m,
+            FromPort::Payload(m @ ClientMsg::Connect(..)) => {
+                //println!("will send message {}", m);
+                m
+            },
+            FromPort::Payload(m @ ClientMsg::Data(..)) => m,
+            FromPort::Payload(_) => unreachable!(),
         };
         //println!("sending {}", c_msg);
         self.server.buffer_msg(c_msg);
@@ -191,6 +195,7 @@ impl Future for RunTunnel {
                 // Server timeout.
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "timeout"))
             } else {
+                //println!("hearbeat");
                 self.server.buffer_msg(ClientMsg::HeartBeat);
             }
         }
@@ -210,6 +215,7 @@ impl Future for RunTunnel {
         loop {
             match self.server.poll()? {
                 Async::Ready(Some(s_msg)) => {
+                    //println!("get server message {}", s_msg);
                     self.process_server_msg(s_msg);
                     self.alive_time = get_time();
                 },

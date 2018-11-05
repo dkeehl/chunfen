@@ -23,3 +23,4 @@ pub mod server;
 mod test;
 
 pub use crate::data::TLSError;
+pub use crate::session::Session;

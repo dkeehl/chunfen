@@ -143,7 +143,7 @@ impl SocksConnection {
                     }))
                 },
                 None => {
-                    println!("Failed to connect remote");
+                    //println!("Failed to connect remote");
                     let resp = Resp::Fail;
                     boxup(response(stream, &resp).and_then(|_| {
                         let dummy: (usize, usize) = (0, 0);

@@ -62,7 +62,7 @@ where R: AsyncRead + 'static,
             }
 
             if self.buffer.is_empty() {
-                self.buffer.reserve(1024);
+                self.buffer.reserve(2 * 1024);
                 let n = try_ready!(
                     self.reader.borrow_mut().read_buf(&mut self.buffer));
                 if n == 0 {

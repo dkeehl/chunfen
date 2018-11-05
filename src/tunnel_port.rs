@@ -18,7 +18,7 @@ use crate::utils::{DomainName, Port, Id};
 use crate::protocol::ClientMsg;
 
 #[derive(Debug)]
-pub enum FromPort<T> {
+pub enum FromPort<T: Debug + 'static> {
     NewPort(Id, Sender<ToPort>),
     Data(Id, Bytes),
     ShutdownWrite(Id),
@@ -35,7 +35,7 @@ pub enum ToPort {
     Close,
 }
 
-pub struct TunnelPort<T> {
+pub struct TunnelPort<T: Debug + 'static> {
     id: Id,
     handle: Handle,
     sender: Sender<FromPort<T>>,
@@ -44,9 +44,7 @@ pub struct TunnelPort<T> {
     eof: bool
 }
 
-impl<T> TunnelPort<T>
-where T: Debug + 'static
-{
+impl<T: Debug + 'static> TunnelPort<T> {
     pub fn new(id: Id, sender: Sender<FromPort<T>>, handle: &Handle)
         -> (Sender<ToPort>, TunnelPort<T>)
     {
@@ -74,14 +72,13 @@ where T: Debug + 'static
         let send = self.sender.clone().send(msg)
             .map(|_| ())
             .map_err(|e| println!("port failed to send {:?}", e.into_inner()));
-        //self.handle.spawn(drop_res!(send))
         self.handle.spawn(send)
     }
 }
 
-struct PortConnectFuture<T>(Option<TunnelPort<T>>);
+struct PortConnectFuture<T: Debug + 'static>(Option<TunnelPort<T>>);
 
-impl<T> Future for PortConnectFuture<T> {
+impl<T: Debug + 'static> Future for PortConnectFuture<T> {
     type Item = Option<(TunnelPort<T>, SocketAddr)>;
     type Error = io::Error;
 
@@ -112,6 +109,7 @@ impl Connector for TunnelPort<ClientMsg> {
     {
         let addr = format!("{}", addr);
         let buf = Bytes::from(addr.as_bytes());
+        //println!("port {} will connect", self.id);
         self.send_raw(ClientMsg::Connect(self.id, buf));
 
         Box::new(self.to_connect_future())
@@ -143,7 +141,7 @@ impl<T: Debug + 'static> Write for TunnelPort<T> {
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-impl<T> Read for TunnelPort<T> {
+impl<T: Debug + 'static> Read for TunnelPort<T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while !self.eof {
             match self.receiver.poll().unwrap() {
@@ -174,20 +172,18 @@ impl<T> Read for TunnelPort<T> {
     }
 }
 
-impl<T> AsyncRead for TunnelPort<T> {}
-/*
-impl<T: Debug + 'static> AsyncWrite for TunnelPort<T> {
-    fn shutdown(&mut self) -> Poll<(), io::Error> {
-        self.send(FromPort::ShutdownWrite(self.id));
-        self.send(FromPort::Close(self.id));
-        Ok(().into())
-    }
-}
-*/
+impl<T: Debug + 'static> AsyncRead for TunnelPort<T> {}
+
 impl<T: Debug + 'static> ShutdownWrite for TunnelPort<T> {
     fn shutdown_write(&mut self) -> io::Result<()> {
         self.send(FromPort::ShutdownWrite(self.id));
-        self.send(FromPort::Close(self.id));
         Ok(())
     }
 }
+
+impl<T: Debug + 'static> Drop for TunnelPort<T> {
+    fn drop(&mut self) {
+        self.send(FromPort::Close(self.id));
+    }
+}
+

@@ -116,10 +116,12 @@ impl Tunnel {
     fn process_client_msg(&mut self, c_msg: ClientMsg) {
         match c_msg {
             ClientMsg::HeartBeat => {
+                //println!("heartbeat");
                 self.client.buffer_msg(ServerMsg::HeartBeatRsp);
             },
             ClientMsg::OpenPort(id) => self.ports.add(id),
             ClientMsg::Connect(id, buf) => {
+                //println!("get connect request for port {}", id);
                 if let Some(addr) = parse_domain_name(buf) {
                     self.ports.connect(id, addr);
                 } else {
@@ -208,6 +210,7 @@ impl PortMap {
                 },
             }
         });
+        //println!("connecting port {}", id);
         handle.spawn(proxing);
     }
 
