@@ -302,18 +302,14 @@ fn parse_method(x: u8) -> Method {
 pub struct Socks5;
 
 impl Socks5 {
-    pub fn bind(listen_addr: &str) {
+    pub fn bind(addr: &SocketAddr) {
         let mut lp = Core::new().unwrap();
         let handle = lp.handle();
-        //let buffer = Rc::new(RefCell::new(vec![0u8; 64 * 1024]));
 
-        let addr = listen_addr.parse().unwrap();
-        let listening = TcpListener::bind(&addr, &handle).unwrap();
+        let listening = TcpListener::bind(addr, &handle).unwrap();
         let clients = listening.incoming().map(|(stream, addr)| {
-            (SocksConnection {
-                //buffer: buffer.clone(),
-                handle: handle.clone(),
-            }.serve(stream, SimpleConnector), addr)
+            (SocksConnection::new(handle.clone()).serve(stream, SimpleConnector),
+            addr)
         });
 
         let handle = lp.handle();

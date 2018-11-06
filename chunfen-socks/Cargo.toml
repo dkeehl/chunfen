@@ -4,9 +4,14 @@ version = "0.1.0"
 authors = ["Thomas Lin <dkeehl@gmail.com>"]
 edition = "2018"
 
+[[bin]]
+name = "socks"
+path = "src/bin/main.rs"
+
 [dependencies]
 log = { version = "*", features = ["std"] }
 futures = "0.1"
 tokio-core = "0.1"
 tokio-io = "0.1"
 bytes = "0.4"
+getopts = "0.2"
