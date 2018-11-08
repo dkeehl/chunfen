@@ -9,9 +9,11 @@ name = "socks"
 path = "src/bin/main.rs"
 
 [dependencies]
-log = { version = "*", features = ["std"] }
+log = "0.4"
 futures = "0.1"
 tokio-core = "0.1"
 tokio-io = "0.1"
 bytes = "0.4"
 getopts = "0.2"
+fern = "0.5"
+chrono = "0.4"

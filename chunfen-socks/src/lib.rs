@@ -4,6 +4,8 @@ extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate bytes;
+#[macro_use]
+extern crate log;
 
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 use std::vec::Vec;
@@ -102,7 +104,6 @@ enum Resp {
 }
 
 pub struct SocksConnection {
-    //buffer: Rc<RefCell<Vec<u8>>>,
     handle: Handle,
 }
 
@@ -115,7 +116,7 @@ impl SocksConnection {
         -> Box<Future<Item = (usize, usize), Error = SocksError>>
         where T: Connector + 'static
     {
-        //println!("New socks request");
+        trace!("New socks request");
         let handshaked = start_handshake(stream);
 
         let handle = self.handle.clone();
@@ -136,14 +137,14 @@ impl SocksConnection {
         let res = connected.and_then(|(stream, conn)| {
             match conn {
                 Some((remote, addr)) => {
-                    //println!("Remote connected");
+                    trace!("Remote connected");
                     let resp = Resp::Success(addr);
                     boxup(response(stream, &resp).and_then(|stream| {
                         pipe(stream, remote).map_err(SocksError::IO)
                     }))
                 },
                 None => {
-                    //println!("Failed to connect remote");
+                    trace!("Failed to connect remote");
                     let resp = Resp::Fail;
                     boxup(response(stream, &resp).and_then(|_| {
                         let dummy: (usize, usize) = (0, 0);
@@ -307,6 +308,8 @@ impl Socks5 {
         let handle = lp.handle();
 
         let listening = TcpListener::bind(addr, &handle).unwrap();
+        println!("Socks server listening on {}...", addr);
+
         let clients = listening.incoming().map(|(stream, addr)| {
             (SocksConnection::new(handle.clone()).serve(stream, SimpleConnector),
             addr)
@@ -317,9 +320,9 @@ impl Socks5 {
             handle.spawn(client.then(move |res| {
                 match res {
                     Ok((a, b)) => {
-                        println!("proxied {}/{} bytes for {}", a, b, addr);
+                        info!("proxied {}/{} bytes for {}", a, b, addr);
                     },
-                    Err(e) => println!("error for {}: {:?}", addr, e),
+                    Err(e) => info!("error for {}: {:?}", addr, e),
                 }
                 future::ok(())
             }));

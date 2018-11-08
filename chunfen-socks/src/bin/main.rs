@@ -1,19 +1,20 @@
 extern crate getopts;
+extern crate fern;
+extern crate chrono;
 extern crate chunfen_socks;
 
-use std::env;
 use std::net::{IpAddr, ToSocketAddrs};
-use getopts::Options;
 use chunfen_socks::Socks5;
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     let program = &args[0];
 
-    let mut opts = Options::new();
+    let mut opts = getopts::Options::new();
     opts.optopt("b", "bind", "Ip address to bind to", "IP")
         .optopt("p", "port", "Port listening on", "PORT")
-        .optflag("h", "help", "Show usage");
+        .optflag("h", "help", "Show usage")
+        .optflagopt("l", "log", "Enable log", "PATH_TO_FILE");
 
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
@@ -39,7 +40,30 @@ fn main() {
         Err(_) => { println!("Invalid port"); return },
     };
 
+    if matches.opt_present("log") {
+        let _ = match matches.opt_str("l").and_then(|path| {
+            fern::log_file(&path).ok()
+        }) {
+            Some(file) => logger_init(file),
+            None => logger_init(std::io::stderr()),
+        };
+    }
+
     let listen_addr = (ip, port).to_socket_addrs().unwrap().next().unwrap();
     Socks5::bind(&listen_addr);
 }
 
+fn logger_init<T: Into<fern::Output>>(logger: T) -> Result<(), fern::InitError> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                    "{}[{}] - {}",
+                    chrono::Local::now().format("[%Y-%m-%d %H:%M]"),
+                    record.level(),
+                    message))
+        })
+        .level(log::LevelFilter::Info)
+        .chain(logger)
+        .apply()?;
+    Ok(())
+}
