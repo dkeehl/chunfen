@@ -5,7 +5,7 @@ use std::io::{self, Write, Read};
 use std::str::from_utf8;
 use std::fmt::Debug;
 
-use tokio_core::reactor::Handle;
+use tokio_current_thread::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
 use futures::future;
 use futures::{Sink, Stream, Future, Poll, Async};
@@ -18,7 +18,7 @@ use crate::utils::{DomainName, Port, Id};
 use crate::protocol::ClientMsg;
 
 #[derive(Debug)]
-pub enum FromPort<T: Debug + 'static> {
+pub enum FromPort<T: Debug + Send + 'static> {
     NewPort(Id, Sender<ToPort>),
     Data(Id, Bytes),
     ShutdownWrite(Id),
@@ -35,7 +35,7 @@ pub enum ToPort {
     Close,
 }
 
-pub struct TunnelPort<T: Debug + 'static> {
+pub struct TunnelPort<T: Debug + Send + 'static> {
     id: Id,
     handle: Handle,
     sender: Sender<FromPort<T>>,
@@ -44,7 +44,7 @@ pub struct TunnelPort<T: Debug + 'static> {
     eof: bool
 }
 
-impl<T: Debug + 'static> TunnelPort<T> {
+impl<T: Debug + Send + 'static> TunnelPort<T> {
     pub fn new(id: Id, sender: Sender<FromPort<T>>, handle: &Handle)
         -> (Sender<ToPort>, TunnelPort<T>)
     {
@@ -72,13 +72,13 @@ impl<T: Debug + 'static> TunnelPort<T> {
         let send = self.sender.clone().send(msg)
             .map(|_| ())
             .map_err(|e| println!("port failed to send {:?}", e.into_inner()));
-        self.handle.spawn(send)
+        let _ = self.handle.spawn(send);
     }
 }
 
-struct PortConnectFuture<T: Debug + 'static>(Option<TunnelPort<T>>);
+struct PortConnectFuture<T: Debug + Send + 'static>(Option<TunnelPort<T>>);
 
-impl<T: Debug + 'static> Future for PortConnectFuture<T> {
+impl<T: Debug + Send + 'static> Future for PortConnectFuture<T> {
     type Item = Option<(TunnelPort<T>, SocketAddr)>;
     type Error = io::Error;
 
@@ -104,7 +104,7 @@ impl<T: Debug + 'static> Future for PortConnectFuture<T> {
 impl Connector for TunnelPort<ClientMsg> {
     type Remote = Self;
 
-    fn connect(self, addr: &SocketAddrV4, _: &Handle)
+    fn connect(self, addr: &SocketAddrV4)
         -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
         let addr = format!("{}", addr);
@@ -115,7 +115,7 @@ impl Connector for TunnelPort<ClientMsg> {
         Box::new(self.to_connect_future())
     }
 
-    fn connect_dn(self, dn: DomainName, port: Port, _: &Handle)
+    fn connect_dn(self, dn: DomainName, port: Port)
         -> Box<Future<Item = Option<(Self, SocketAddr)>, Error = io::Error>>
     {
         self.send_raw(ClientMsg::ConnectDN(self.id, dn, port));
@@ -129,7 +129,7 @@ fn try_get_binded_addr(buf: &[u8]) -> Option<SocketAddr> {
         .and_then(|mut addr_iter| addr_iter.nth(0))
 }
 
-impl<T: Debug + 'static> Write for TunnelPort<T> {
+impl<T: Debug + Send + 'static> Write for TunnelPort<T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = buf.len();
         let data = Bytes::from(buf);
@@ -141,7 +141,7 @@ impl<T: Debug + 'static> Write for TunnelPort<T> {
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-impl<T: Debug + 'static> Read for TunnelPort<T> {
+impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while !self.eof {
             match self.receiver.poll().unwrap() {
@@ -172,16 +172,16 @@ impl<T: Debug + 'static> Read for TunnelPort<T> {
     }
 }
 
-impl<T: Debug + 'static> AsyncRead for TunnelPort<T> {}
+impl<T: Debug + Send + 'static> AsyncRead for TunnelPort<T> {}
 
-impl<T: Debug + 'static> ShutdownWrite for TunnelPort<T> {
+impl<T: Debug + Send + 'static> ShutdownWrite for TunnelPort<T> {
     fn shutdown_write(&mut self) -> io::Result<()> {
         self.send(FromPort::ShutdownWrite(self.id));
         Ok(())
     }
 }
 
-impl<T: Debug + 'static> Drop for TunnelPort<T> {
+impl<T: Debug + Send + 'static> Drop for TunnelPort<T> {
     fn drop(&mut self) {
         self.send(FromPort::Close(self.id));
     }

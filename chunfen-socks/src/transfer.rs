@@ -5,7 +5,7 @@ use std::net::Shutdown;
 
 use futures::{Poll, Future};
 use tokio_io::AsyncRead;
-use tokio_core::net::TcpStream;
+use tokio_tcp::TcpStream;
 use bytes::BytesMut;
 
 use crate::utils::boxup;

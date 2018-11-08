@@ -4,8 +4,7 @@ use std::str::from_utf8;
 
 use futures::future;
 use futures::Future;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Handle;
+use tokio_tcp::TcpStream;
 use tokio_io::AsyncRead;
 
 use crate::{DomainName, Port};
@@ -16,14 +15,14 @@ use crate::utils::*;
 pub trait Connector: Sized {
     type Remote: AsyncRead + io::Write + ShutdownWrite + 'static;
 
-    fn connect(self, addr: &SocketAddrV4, handle: &Handle)
+    fn connect(self, addr: &SocketAddrV4)
         -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error>>;
 
-    fn connect_dn(self, dn: DomainName, port: Port, handle: &Handle)
+    fn connect_dn(self, dn: DomainName, port: Port)
         -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error>>
     {
         match try_parse_domain_name(dn, port) {
-            Some(SocketAddr::V4(addr)) => self.connect(&addr, handle),
+            Some(SocketAddr::V4(addr)) => self.connect(&addr),
             Some(_) => unimplemented!(),
             None => Box::new(future::err(
                     io::Error::new(io::ErrorKind::InvalidData, "invalid domain name")))
@@ -42,10 +41,10 @@ pub struct SimpleConnector;
 impl Connector for SimpleConnector {
     type Remote = TcpStream;
 
-    fn connect(self, addr: &SocketAddrV4, handle: &Handle)
+    fn connect(self, addr: &SocketAddrV4)
         -> Box<Future<Item = Option<(TcpStream, SocketAddr)>, Error = io::Error>>
     {
-        let stream = TcpStream::connect(&SocketAddr::V4(*addr), handle)
+        let stream = TcpStream::connect(&SocketAddr::V4(*addr))
             .map(|tcp| {
                 let addr = tcp.local_addr().unwrap();
                 Some((tcp, addr))

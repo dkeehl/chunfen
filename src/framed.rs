@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use bytes::{BufMut, BytesMut};
 use futures::{Poll, Async, Stream};
-use tokio_core::net::TcpStream;
+use tokio_tcp::TcpStream;
 use tokio_io::AsyncRead;
 use nom::Err::Incomplete;
 

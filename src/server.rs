@@ -3,9 +3,10 @@ use std::io;
 use std::collections::HashMap;
 
 use time::{Timespec, get_time};
-use tokio_core::reactor::{Core, Handle};
-use tokio_core::net::TcpStream;
+use tokio_current_thread::{self as ct, CurrentThread, Handle};
+use tokio_tcp::TcpStream;
 use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_reactor as reactor;
 use futures::future;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Receiver, Sender};
@@ -29,7 +30,7 @@ impl Server {
         for s in listening.incoming() {
             // Block. One tunnel at a time.
             if let Ok(stream) = s {
-                Tunnel::new(stream, &key[..])
+                Tunnel::new(stream, &key)
             }
         }
     }
@@ -49,10 +50,10 @@ impl Tunnel {
         println!("Request from {}, creat new tunnel.",
                  stream.peer_addr().unwrap());
 
-        let mut lp = Core::new().unwrap();
+        let mut lp = CurrentThread::new();
         let handle = lp.handle();
 
-        let tcp = TcpStream::from_stream(stream, &handle).unwrap();
+        let tcp = TcpStream::from_std(stream, &reactor::Handle::default()).unwrap();
         let session = ServerSession::new(key);
         let (sender, receiver) = mpsc::channel(1000);
 
@@ -66,12 +67,13 @@ impl Tunnel {
         }).then(|res| {
             match res {
                 Ok(_) => println!("peer at eof, quit"),
-                Err(e) => println!("an error occured: {}, tunnel broken", e),
+                Err(e) => println!("an error occured: {:?}, tunnel broken", e),
             }
             future::ok::<(), ()>(())
         });
 
-        lp.run(tunnel).unwrap()
+        lp.spawn(tunnel);
+        lp.run().unwrap()
     }
 }
 
@@ -186,13 +188,12 @@ impl PortMap {
     }
 
     fn connect(&mut self, id: Id, addr: SocketAddr)  {
-        let handle = self.handle.clone();
-        let (sender, port) = TunnelPort::new(id, self.sender.clone(), &handle);
+        let (sender, port) = TunnelPort::new(id, self.sender.clone(), &self.handle);
         let _ = self.ports.insert(id, Some(sender));
 
         // Spawn a new task to connect, to avoid the connect action blocking the
         // main thread.
-        let connect = TcpStream::connect(&addr, &handle);
+        let connect = TcpStream::connect(&addr);
         let proxing = connect.then(move |res| {
             match res {
                 Ok(stream) => {
@@ -211,7 +212,7 @@ impl PortMap {
             }
         });
         //println!("connecting port {}", id);
-        handle.spawn(proxing);
+        ct::spawn(proxing);
     }
 
     fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port) {
@@ -220,14 +221,14 @@ impl PortMap {
         } else {
             let send = self.sender.clone()
                 .send(FromPort::Payload(connection_fail(id)));
-            self.handle.spawn(drop_res!(send))
+            ct::spawn(drop_res!(send))
         }
     }
 
     fn send_to_port(&self, id: Id, msg: ToPort) {
         if let Some(Some(port)) = self.ports.get(&id) {
             let send = port.clone().send(msg);
-            self.handle.spawn(drop_res!(send))
+            ct::spawn(drop_res!(send))
         }
     }
 

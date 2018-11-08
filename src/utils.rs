@@ -10,7 +10,8 @@ use std::str::from_utf8;
 use std::marker::Sized;
 
 use bytes::{Bytes, BytesMut};
-use tokio_core::reactor::{Handle, Timeout};
+use tokio_timer::Delay;
+use tokio_timer::timer::Handle;
 use futures::{Future, Stream, Poll};
 use nom::IResult;
 
@@ -56,23 +57,23 @@ pub fn parse_domain_name(dn: DomainName) -> Option<SocketAddr> {
 
 // Timer
 pub struct Timer {
-    timeout: Timeout,
+    timeout: Delay,
     duration: Duration,
 }
 
 impl Timer {
     pub fn new(t: u64, handle: &Handle) -> Timer {
         let t = Duration::from_millis(t);
-        let timeout = Timeout::new(t, handle).unwrap();
+        let timeout = handle.delay(Instant::now() + t);
         Timer { timeout, duration: t }
     }
 }
 
 impl Stream for Timer {
     type Item = ();
-    type Error = io::Error;
+    type Error = tokio_timer::Error;
 
-    fn poll(&mut self) -> Poll<Option<()>, io::Error> {
+    fn poll(&mut self) -> Poll<Option<()>, Self::Error> {
         try_ready!(self.timeout.poll());
         let next = Instant::now() + self.duration;
         self.timeout.reset(next);

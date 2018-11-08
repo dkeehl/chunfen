@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 
 use futures::{Poll, Async, Future};
-use tokio_core::net::TcpStream;
+use tokio_tcp::TcpStream;
 use tokio_io::AsyncRead;
 
 use chunfen_sec::Session;

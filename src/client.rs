@@ -4,9 +4,12 @@ use std::io::{self, Write, Read};
 use std::collections::HashMap;
 
 use time::{Timespec, get_time};
-use tokio_core::reactor::{Core, Handle};
-use tokio_core::net::{TcpStream, TcpListener};
+use tokio_current_thread::{self as ct, CurrentThread, Handle};
+use tokio_tcp::{TcpStream, TcpListener};
 use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_reactor::Handle as ReactorHandle;
+use tokio_executor::park::ParkThread;
+use tokio_timer::timer::{Handle as TimerHandle, Timer as TokioTimer};
 use futures::future;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
@@ -23,14 +26,12 @@ use crate::tls;
 
 struct PortMap {
     ports: HashMap<Id, Sender<ToPort>>,
-    handle: Handle
 }
 
 impl PortMap {
-    fn new(handle: &Handle) -> PortMap {
+    fn new() -> PortMap {
         PortMap {
             ports: HashMap::new(),
-            handle: handle.clone(),
         }
     }
 
@@ -46,7 +47,7 @@ impl PortMap {
         match self.ports.get(&id) {
             Some(v) => {
                 let send = v.clone().send(msg);
-                self.handle.spawn(drop_res!(send))
+                ct::spawn(drop_res!(send))
             },
             None => info!("sending to an nonexist port {}", id),
         }
@@ -96,11 +97,11 @@ impl Tunnel {
     fn run(stream: Tls,
            sender: Sender<FromPort<ClientMsg>>,
            receiver: Receiver<FromPort<ClientMsg>>,
-           handle: Handle) -> RunTunnel
+           handle: TimerHandle) -> RunTunnel
     {
         let server: Framed<ServerMsg, ClientMsg, Tls> = Framed::new(stream);
         let timer = Timer::new(HEARTBEAT_INTERVAL_MS as u64, &handle);
-        let ports = PortMap::new(&handle);
+        let ports = PortMap::new();
         let alive_time = get_time();
         RunTunnel {
             server,
@@ -117,19 +118,22 @@ fn run_tunnel(stream: net::TcpStream,
               sender: Sender<FromPort<ClientMsg>>,
               receiver: Receiver<FromPort<ClientMsg>>)
 {
-    let mut lp = Core::new().unwrap();
-    let handle = lp.handle();
+    let timer = TokioTimer::new(ParkThread::new());
+    let handle = timer.handle();
+    let mut lp = CurrentThread::new_with_park(timer);
 
-    let tcp = TcpStream::from_stream(stream, &handle).unwrap();
-    let session = ClientSession::new(&key[..]);
+    let tcp = TcpStream::from_std(stream, &ReactorHandle::default()).unwrap();
+    let session = ClientSession::new(&key);
 
     let tunnel = tls::connect(session, tcp).and_then(|stream| {
         Tunnel::run(stream, sender, receiver, handle)
+    }).map_err(|e| {
+        println!("An error occured: {:#?}", e);
+        ()
     });
 
-    if let Err(e) = lp.run(tunnel) {
-        println!("an error occured: {:?}", e);
-    }
+    lp.spawn(tunnel);
+    lp.run().unwrap()
 }
 
 struct RunTunnel {
@@ -189,7 +193,7 @@ impl Future for RunTunnel {
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<(), io::Error> {
-        if let Async::Ready(_) = self.timer.poll()? {
+        if let Async::Ready(_) = self.timer.poll().unwrap() {
             let dur = get_time() - self.alive_time;
             if dur.num_milliseconds() > ALIVE_TIMEOUT_TIME_MS {
                 // Server timeout.
@@ -233,21 +237,22 @@ pub struct Client;
 
 impl Client {
     pub fn new(listen_addr: &str, server_addr: &str, key: Vec<u8>) {
-        let mut lp = Core::new().unwrap();
+        let mut lp = CurrentThread::new();
         let handle = lp.handle();
         let listen_addr = listen_addr.parse().unwrap();
 
-        let listening = TcpListener::bind(&listen_addr, &handle).unwrap();
+        let listening = TcpListener::bind(&listen_addr).unwrap();
         let mut tunnel = Tunnel::new(server_addr, key);
 
-        let client = listening.incoming().for_each(move |(stream, _)| {
+        let client = listening.incoming().for_each(move |stream| {
             // TODO: Quit if tunnel broken
             let mut port = tunnel.new_port(&handle);
-            let proxy = SocksConnection::new(handle.clone()).serve(stream, port);
-            handle.spawn(proxy.then(|_| future::ok(())));
+            let proxy = SocksConnection::serve(stream, port);
+            ct::spawn(drop_res!(proxy));
             Ok(())
         });
         
-        lp.run(client).unwrap()
+        lp.spawn(drop_res!(client));
+        lp.run().unwrap()
     }
 }

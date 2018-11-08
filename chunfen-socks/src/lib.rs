@@ -1,9 +1,9 @@
+#![warn(unused)]
+
 #[macro_use]
 extern crate futures;
 #[macro_use]
-extern crate tokio_core;
 extern crate tokio_io;
-extern crate bytes;
 #[macro_use]
 extern crate log;
 
@@ -14,8 +14,8 @@ use std::io;
 
 use futures::future;
 use futures::{Future, Stream};
-use tokio_core::net::{TcpStream, TcpListener};
-use tokio_core::reactor::{Handle, Core};
+use tokio_tcp::{TcpStream, TcpListener};
+use tokio_current_thread::CurrentThread;
 use tokio_io::io::{read_exact, write_all};
 use bytes::{Bytes, BytesMut, BufMut};
 
@@ -103,31 +103,24 @@ enum Resp {
     Fail,
 }
 
-pub struct SocksConnection {
-    handle: Handle,
-}
+pub struct SocksConnection;
 
 impl SocksConnection {
-    pub fn new(handle: Handle) -> Self {
-        SocksConnection { handle }
-    }
-
-    pub fn serve<T>(self, stream: TcpStream, connector: T)
+    pub fn serve<T>(stream: TcpStream, connector: T)
         -> Box<Future<Item = (usize, usize), Error = SocksError>>
         where T: Connector + 'static
     {
         trace!("New socks request");
         let handshaked = start_handshake(stream);
 
-        let handle = self.handle.clone();
         let connected = handshaked.and_then(move |(stream, req)| {
             match req {
                 Req::Cmd(Ver::V5, Command::Connect, Addr::Ipv4(addr)) => {
-                    connector.connect(&addr, &handle)
+                    connector.connect(&addr)
                 },
 
                 Req::Cmd(Ver::V5, Command::Connect, Addr::DN(dn, port)) => {
-                    connector.connect_dn(dn, port, &handle)
+                    connector.connect_dn(dn, port)
                 },
 
                 _ => unreachable!(),
@@ -304,20 +297,19 @@ pub struct Socks5;
 
 impl Socks5 {
     pub fn bind(addr: &SocketAddr) {
-        let mut lp = Core::new().unwrap();
-        let handle = lp.handle();
+        let mut lp = CurrentThread::new();
 
-        let listening = TcpListener::bind(addr, &handle).unwrap();
+        let listening = TcpListener::bind(addr).unwrap();
         println!("Socks server listening on {}...", addr);
 
-        let clients = listening.incoming().map(|(stream, addr)| {
-            (SocksConnection::new(handle.clone()).serve(stream, SimpleConnector),
-            addr)
+        let clients = listening.incoming().map(|(stream)| {
+            let addr = stream.peer_addr().unwrap();
+            let client = SocksConnection::serve(stream, SimpleConnector);
+            (client, addr)
         });
 
-        let handle = lp.handle();
         let server = clients.for_each(|(client, addr)| {
-            handle.spawn(client.then(move |res| {
+            tokio_current_thread::spawn(client.then(move |res| {
                 match res {
                     Ok((a, b)) => {
                         info!("proxied {}/{} bytes for {}", a, b, addr);
@@ -329,6 +321,7 @@ impl Socks5 {
             Ok(())
         });
 
-        lp.run(server).unwrap()
+        lp.spawn(server.map_err(|_| ()));
+        lp.run().unwrap()
     }
 }
