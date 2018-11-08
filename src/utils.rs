@@ -1,10 +1,4 @@
-use std::thread;
-use std::sync::mpsc;
-use std::io;
-use std::io::Write;
-use std::sync::mpsc::{Sender, Receiver};
 use std::time::{Instant, Duration};
-use std::vec::Vec;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::from_utf8;
 use std::marker::Sized;
@@ -23,11 +17,6 @@ pub type Port = u16;
 
 macro_rules! drop_res {
     ($fut:expr) => ($fut.map(|_| ()).map_err(|_| ()))
-}
-
-// Errors
-pub fn not_connected() -> io::Error {
-    io::Error::new(io::ErrorKind::NotConnected, "not connected")
 }
 
 // Codec

@@ -1,16 +1,15 @@
-use std::net::{self, TcpListener, SocketAddr, SocketAddrV4};
+use std::net::{self, TcpListener, SocketAddr};
 use std::io;
 use std::collections::HashMap;
 
 use time::{Timespec, get_time};
 use tokio_current_thread::{self as ct, CurrentThread, Handle};
 use tokio_tcp::TcpStream;
-use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_reactor as reactor;
 use futures::future;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Receiver, Sender};
-use bytes::{BufMut, BytesMut, Bytes};
+use bytes::Bytes;
 
 use chunfen_sec::server::ServerSession;
 use chunfen_socks::pipe;

@@ -6,11 +6,10 @@ use std::str::from_utf8;
 use std::fmt::Debug;
 
 use tokio_current_thread::Handle;
-use tokio_io::{AsyncRead, AsyncWrite};
-use futures::future;
+use tokio_io::AsyncRead;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
-use bytes::{Bytes, BufMut, BytesMut};
+use bytes::{Bytes, BytesMut};
 
 use chunfen_socks::{ShutdownWrite, Connector};
 

@@ -1,4 +1,4 @@
-#![allow(unused)]
+#![warn(unused)]
 
 #[macro_use]
 extern crate log;

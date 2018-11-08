@@ -1,9 +1,8 @@
-use std::io::{self, Write, Read};
+use std::io::{self, Write};
 use std::marker::PhantomData;
 
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use futures::{Poll, Async, Stream};
-use tokio_tcp::TcpStream;
 use tokio_io::AsyncRead;
 use nom::Err::Incomplete;
 
@@ -77,10 +76,7 @@ where I: Decode,
                     ParseResult::Ok{ msg, consumed: len - remain }
                 },
                 Err(Incomplete(_)) => ParseResult::Incomplete,
-                Err(e) => {
-                    //println!("parse error: {}", e);
-                    ParseResult::Err
-                },
+                Err(_) => ParseResult::Err,
             }
         };
 

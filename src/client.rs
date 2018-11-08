@@ -1,25 +1,22 @@
-use std::net::{self, SocketAddr, SocketAddrV4, Shutdown, ToSocketAddrs};
+use std::net;
 use std::thread;
-use std::io::{self, Write, Read};
+use std::io;
 use std::collections::HashMap;
 
 use time::{Timespec, get_time};
 use tokio_current_thread::{self as ct, CurrentThread, Handle};
 use tokio_tcp::{TcpStream, TcpListener};
-use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_reactor::Handle as ReactorHandle;
 use tokio_executor::park::ParkThread;
 use tokio_timer::timer::{Handle as TimerHandle, Timer as TokioTimer};
-use futures::future;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
-use bytes::{BufMut, BytesMut};
 
 use chunfen_sec::client::ClientSession;
 use chunfen_socks::SocksConnection;
 
 use crate::framed::Framed;
-use crate::utils::{self, Timer, DomainName, Port, Id};
+use crate::utils::{Timer, Id};
 use crate::tunnel_port::{ToPort, FromPort, TunnelPort};
 use crate::protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 use crate::tls;
@@ -70,15 +67,14 @@ impl Tunnel {
         let stream = net::TcpStream::connect(server)
             .expect("can't connect to server");
         let (sender, receiver) = mpsc::channel(1000);
-        let cloned_sender = sender.clone();
         thread::spawn(|| {
-            run_tunnel(stream, key, cloned_sender, receiver)
+            run_tunnel(stream, key, receiver)
         });
 
         Tunnel { sender, count: 0, }
     }
 
-    fn new_port(&mut self, handle: &Handle) -> TunnelPort<ClientMsg> {
+    fn new_port(&mut self, handle: &Handle) -> Option<TunnelPort<ClientMsg>> {
         let id = self.count;
         //println!("new port {}!", id);
         // Open a channel between the port and the tunnel. The sender is send 
@@ -88,14 +84,14 @@ impl Tunnel {
         let send = self.sender.clone()
             .send(FromPort::NewPort(id, sender))
             .map(|_| ())
-            .map_err(|_| panic!("background tunnel broken"));
-        handle.spawn(send);
-        self.count += 1;
-        port
+            .map_err(|_| { warn!("background tunnel broken"); panic!() });
+        handle.spawn(send).ok().and_then(|_| {
+            self.count += 1;
+            Some(port)
+        })
     }
 
     fn run(stream: Tls,
-           sender: Sender<FromPort<ClientMsg>>,
            receiver: Receiver<FromPort<ClientMsg>>,
            handle: TimerHandle) -> RunTunnel
     {
@@ -115,7 +111,6 @@ impl Tunnel {
 
 fn run_tunnel(stream: net::TcpStream,
               key: Vec<u8>,
-              sender: Sender<FromPort<ClientMsg>>,
               receiver: Receiver<FromPort<ClientMsg>>)
 {
     let timer = TokioTimer::new(ParkThread::new());
@@ -126,7 +121,7 @@ fn run_tunnel(stream: net::TcpStream,
     let session = ClientSession::new(&key);
 
     let tunnel = tls::connect(session, tcp).and_then(|stream| {
-        Tunnel::run(stream, sender, receiver, handle)
+        Tunnel::run(stream, receiver, handle)
     }).map_err(|e| {
         println!("An error occured: {:#?}", e);
         ()
@@ -246,7 +241,7 @@ impl Client {
 
         let client = listening.incoming().for_each(move |stream| {
             // TODO: Quit if tunnel broken
-            let mut port = tunnel.new_port(&handle);
+            let port = tunnel.new_port(&handle).unwrap();
             let proxy = SocksConnection::serve(stream, port);
             ct::spawn(drop_res!(proxy));
             Ok(())
