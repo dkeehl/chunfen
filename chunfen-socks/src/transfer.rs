@@ -1,34 +1,29 @@
-use std::io;
-use std::rc::Rc;
-use std::cell::RefCell;
+use std::io::{self, Write};
 use std::net::Shutdown;
 
-use futures::{Poll, Future};
+use futures::{Async, Poll, Future};
+use futures::sync::BiLock;
 use tokio_io::AsyncRead;
 use tokio_tcp::TcpStream;
 use bytes::BytesMut;
 
-use crate::utils::boxup;
-
 pub fn pipe<T, S>(a: T, b: S)
-    -> Box<Future<Item = (usize, usize), Error = io::Error>>
+    -> impl Future<Item = (usize, usize), Error = io::Error> + Send
     where
-        T: AsyncRead + io::Write + ShutdownWrite + 'static,
-        S: AsyncRead + io::Write + ShutdownWrite + 'static
+        T: AsyncRead + Write + ShutdownWrite + Send + 'static,
+        S: AsyncRead + Write + ShutdownWrite + Send + 'static
 {
-    let r1 = Rc::new(RefCell::new(a));
-    let w1 = Rc::new(RefCell::new(b));
-    let r2 = w1.clone();
-    let w2 = r1.clone();
+    let (ar, aw) = BiLock::new(a);
+    let (br, bw) = BiLock::new(b);
 
-    let half1 = transfer(r1, w1);
-    let half2 = transfer(r2, w2);
-    boxup(half1.join(half2))
+    let half1 = transfer(ar, bw);
+    let half2 = transfer(br, aw);
+    half1.join(half2)
 }
 
-fn transfer<R, W>(reader: Rc<RefCell<R>>, writer: Rc<RefCell<W>>) -> Transfer<R, W>
+fn transfer<R, W>(reader: BiLock<R>, writer: BiLock<W>) -> Transfer<R, W>
     where R: AsyncRead + 'static,
-          W: io::Write + ShutdownWrite + 'static
+          W: Write + ShutdownWrite + 'static
 {
     Transfer {
         reader,
@@ -40,16 +35,25 @@ fn transfer<R, W>(reader: Rc<RefCell<R>>, writer: Rc<RefCell<W>>) -> Transfer<R,
 }
 
 struct Transfer<R, W> {
-    reader: Rc<RefCell<R>>,
-    writer: Rc<RefCell<W>>,
+    reader: BiLock<R>,
+    writer: BiLock<W>,
     buffer: BytesMut,
     closing: bool,
     wlen: usize,
 }
 
+macro_rules! ready {
+    ($lock: expr) => {
+        match $lock.poll_lock() {
+            Async::Ready(val) => val,
+            Async::NotReady => return Ok(Async::NotReady),
+        }
+    }
+}
+
 impl<R, W> Future for Transfer<R, W>
 where R: AsyncRead + 'static,
-      W: io::Write + ShutdownWrite + 'static
+      W: Write + ShutdownWrite + 'static
 {
     type Item = usize;
     type Error = io::Error;
@@ -57,21 +61,23 @@ where R: AsyncRead + 'static,
     fn poll(&mut self) -> Poll<usize, io::Error> {
         loop {
             if self.closing {
-                try_nb!(self.writer.borrow_mut().shutdown_write());
+                let mut writer = ready!(self.writer); 
+                try_nb!(writer.shutdown_write());
                 return Ok(self.wlen.into())
             }
 
             if self.buffer.is_empty() {
                 self.buffer.reserve(2 * 1024);
-                let n = try_ready!(
-                    self.reader.borrow_mut().read_buf(&mut self.buffer));
+                let mut reader = ready!(self.reader);
+                let n = try_ready!(reader.read_buf(&mut self.buffer));
                 if n == 0 {
                     self.closing = true;
                     continue
                 }
             }
 
-            let n = try_nb!(self.writer.borrow_mut().write(&self.buffer));
+            let mut writer = ready!(self.writer);
+            let n = try_nb!(writer.write(&self.buffer));
             assert!(n > 0);
             self.buffer.advance(n);
             self.wlen += n;

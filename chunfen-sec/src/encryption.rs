@@ -7,11 +7,11 @@ use crate::key_schedule::{derive_traffic_key, derive_traffic_iv};
 use crate::suites::SupportedCipherSuite;
 use ring;
 
-pub trait MsgEncryptor {
+pub trait MsgEncryptor: Send {
     fn encrypt(&self, m: BorrowedMessage, seq: u64) -> Result<CipherText, TLSError>;
 }
 
-pub trait MsgDecryptor {
+pub trait MsgDecryptor: Send {
     fn decrypt(&self, m: CipherText, seq: u64) -> Result<PlainText, TLSError>;
 }
 

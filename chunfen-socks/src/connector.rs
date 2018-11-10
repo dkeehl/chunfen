@@ -9,17 +9,16 @@ use tokio_io::AsyncRead;
 
 use crate::{DomainName, Port};
 use crate::transfer::ShutdownWrite;
-use crate::utils::*;
 
 // Open a tcp connection to out bound
-pub trait Connector: Sized {
-    type Remote: AsyncRead + io::Write + ShutdownWrite + 'static;
+pub trait Connector: Send + Sized {
+    type Remote: AsyncRead + io::Write + ShutdownWrite + Send + 'static;
 
     fn connect(self, addr: &SocketAddrV4)
-        -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error>>;
+        -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error> + Send>;
 
     fn connect_dn(self, dn: DomainName, port: Port)
-        -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error>>
+        -> Box<Future<Item = Option<(Self::Remote, SocketAddr)>, Error = io::Error> + Send>
     {
         match try_parse_domain_name(dn, port) {
             Some(SocketAddr::V4(addr)) => self.connect(&addr),
@@ -42,7 +41,7 @@ impl Connector for SimpleConnector {
     type Remote = TcpStream;
 
     fn connect(self, addr: &SocketAddrV4)
-        -> Box<Future<Item = Option<(TcpStream, SocketAddr)>, Error = io::Error>>
+        -> Box<Future<Item = Option<(TcpStream, SocketAddr)>, Error = io::Error> + Send>
     {
         let stream = TcpStream::connect(&SocketAddr::V4(*addr))
             .map(|tcp| {
@@ -51,7 +50,7 @@ impl Connector for SimpleConnector {
             }).or_else(|_| {
                 future::ok(None)
             });
-        boxup(stream)
+        Box::new(stream)
     }
 }
 

@@ -28,7 +28,7 @@ impl ClientSession {
 type NextState = Box<State>;
 type NextStateOrError = Result<NextState, TLSError>;
 
-trait State {
+trait State: Send {
     fn handle(self: Box<Self>, session: &mut ClientSession, msg: PlainText)
         -> NextStateOrError;
 }

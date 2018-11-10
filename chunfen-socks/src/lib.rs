@@ -15,7 +15,6 @@ use std::io;
 use futures::future;
 use futures::{Future, Stream};
 use tokio_tcp::{TcpStream, TcpListener};
-use tokio_current_thread::CurrentThread;
 use tokio_io::io::{read_exact, write_all};
 use bytes::{Bytes, BytesMut, BufMut};
 
@@ -107,13 +106,11 @@ pub struct SocksConnection;
 
 impl SocksConnection {
     pub fn serve<T>(stream: TcpStream, connector: T)
-        -> Box<Future<Item = (usize, usize), Error = SocksError>>
+        -> impl Future<Item = (usize, usize), Error = SocksError> + Send
         where T: Connector + 'static
     {
         trace!("New socks request");
-        let handshaked = start_handshake(stream);
-
-        let connected = handshaked.and_then(move |(stream, req)| {
+        start_handshake(stream).and_then(move |(stream, req)| {
             match req {
                 Req::Cmd(Ver::V5, Command::Connect, Addr::Ipv4(addr)) => {
                     connector.connect(&addr)
@@ -124,41 +121,40 @@ impl SocksConnection {
                 },
 
                 _ => unreachable!(),
-            }.map(|conn| (stream, conn)).map_err(SocksError::IO)
-        });
-
-        let res = connected.and_then(|(stream, conn)| {
+            }
+            .map(|conn| (stream, conn)).map_err(SocksError::IO)
+        }).and_then(|(stream, conn)| {
             match conn {
                 Some((remote, addr)) => {
                     trace!("Remote connected");
                     let resp = Resp::Success(addr);
-                    boxup(response(stream, &resp).and_then(|stream| {
+                    let fut = response(stream, &resp).and_then(|stream| {
                         pipe(stream, remote).map_err(SocksError::IO)
-                    }))
+                    });
+                    boxup(fut)
                 },
                 None => {
                     trace!("Failed to connect remote");
                     let resp = Resp::Fail;
-                    boxup(response(stream, &resp).and_then(|_| {
+                    let fut = response(stream, &resp).and_then(|_| {
                         let dummy: (usize, usize) = (0, 0);
-                        future::ok(dummy)
-                    }))
+                        Ok(dummy)
+                    });
+                    boxup(fut)
                 },
             }
-        });
-        boxup(res)
+        })
     }
 }
 
 fn response(stream: TcpStream, resp: &Resp)
-    -> Box<Future<Item = TcpStream, Error = SocksError>>
+    -> impl Future<Item=TcpStream, Error=SocksError> + Send
 {
     let mut buf = BytesMut::new();
     resp.encode(&mut buf);
-    let res = write_all(stream, buf)
+    write_all(stream, buf)
         .map(|(s, _)| s)
-        .map_err(SocksError::IO);
-    boxup(res)
+        .map_err(SocksError::IO)
 }
 
 impl Resp {
@@ -182,91 +178,97 @@ impl Resp {
 }
 
 fn start_handshake(stream: TcpStream)
-        -> Box<Future<Item=(TcpStream, Req), Error=SocksError>>
+        -> impl Future<Item=(TcpStream, Req), Error=SocksError> + Send
 {
-    let got = get_methods(stream);
-
-    let resp = got.and_then(|(stream, req)| {
+    get_methods(stream).and_then(|(stream, req)| {
         match req {
             Req::Methods(Ver::V5, methods) => {
                 let method = select_method(&methods);
                 let resp = Resp::Select(Ver::V5, method);
-                boxup(response(stream, &resp).and_then(move |stream| {
+                let fut = response(stream, &resp).and_then(move |stream| {
                     if method == Method::NoAccp {
                         Err(SocksError::Done)
                     } else {
                         Ok(stream)
                     }
-                }))
+                });
+                boxup(fut)
             },
 
             _ => boxup(future::err(SocksError::Unimplemented)),
         }
-    });
-    boxup(resp.and_then(|stream| get_command(stream)))
+    }).and_then(|stream| {
+        get_command(stream)
+    })
 }
 
 fn get_methods(stream: TcpStream)
-    -> Box<Future<Item=(TcpStream, Req), Error=SocksError>>
+    -> impl Future<Item=(TcpStream, Req), Error=SocksError> + Send
 {
-    let req = read_exact(stream, [0u8]).map_err(SocksError::IO)
+    read_exact(stream, [0u8])
+        .map_err(SocksError::IO)
         .and_then(|(stream, buf)| {
         match buf[0] {
             SOCKS_V5 => {
-                boxup(read_exact(stream, [0u8]).and_then(|(stream, num_methods)| {
+                let req = read_exact(stream, [0u8]).and_then(|(stream, num_methods)| {
                     read_exact(stream, vec![0u8; num_methods[0] as usize])
-                }).and_then(|(stream, buf)| {
+                }).map(|(stream, buf)| {
                     let methods = buf.iter().map(|x| parse_method(*x)).collect();
-                    future::ok((stream, Req::Methods(Ver::V5, methods)))
-                }).map_err(SocksError::IO))
+                    (stream, Req::Methods(Ver::V5, methods))
+                });
+                boxup(req.map_err(SocksError::IO))
             },
 
             _ => boxup(future::err(SocksError::Unimplemented)),
         }
-    });
-    boxup(req)
+    })
 }
 
 fn get_command(stream: TcpStream)
-    -> Box<Future<Item=(TcpStream, Req), Error=SocksError>>
+    -> impl Future<Item=(TcpStream, Req), Error=SocksError> + Send
 {
-    let req = read_exact(stream, [0u8; 4]).map_err(SocksError::IO)
+    read_exact(stream, [0u8; 4])
+        .map_err(SocksError::IO)
         .and_then(|(stream, buf)| {
         match buf {
             [SOCKS_V5, CMD_CONNECT, RSV, atype] => {
-                boxup(get_addr(stream, atype).and_then(|(stream, addr)| {
-                    Ok((stream, Req::Cmd(Ver::V5, Command::Connect, addr)))
-                }))
+                let cmd = get_addr(stream, atype).map(|(stream, addr)| {
+                    (stream, Req::Cmd(Ver::V5, Command::Connect, addr))
+                });
+                boxup(cmd)
             },
 
             _ => boxup(future::err(SocksError::Unimplemented)),
         }
-    });
-    boxup(req)
+    })
 }
 
 fn get_addr(stream: TcpStream, atype: u8) 
-    -> Box<Future<Item=(TcpStream, Addr), Error=SocksError>>
+    -> impl Future<Item=(TcpStream, Addr), Error=SocksError> + Send
 {
     match atype {
         ATYP_IP_V4 => {
-            boxup(read_exact(stream, [0u8; 6]).and_then(|(stream, buf)| {
+            let fut = read_exact(stream, [0u8; 6]).map(|(stream, buf)| {
                 let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
                 let port = ((buf[4] as u16) << 8) | buf[5] as u16;
                 let addr = SocketAddrV4::new(addr, port);
-                Ok((stream, Addr::Ipv4(addr)))
-            }).map_err(SocksError::IO))
+                (stream, Addr::Ipv4(addr))
+            })
+            .map_err(SocksError::IO);
+            boxup(fut)
         },
 
         ATYP_DOMAINNAME => {
-            boxup(read_exact(stream, [0u8]).and_then(|(stream, len)| {
+            let fut = read_exact(stream, [0u8]).and_then(|(stream, len)| {
                 read_exact(stream, vec![0u8; len[0] as usize + 2])
-            }).and_then(|(stream, name_port)| {
+            }).map(|(stream, name_port)| {
                 let len = name_port.len() - 2;
                 let domain_name = Bytes::from(&name_port[..len]);
                 let port = ((name_port[len] as u16) << 8) | name_port[len + 1] as u16;
-                Ok((stream, Addr::DN(domain_name, port)))
-            }).map_err(SocksError::IO))
+                (stream, Addr::DN(domain_name, port))
+            })
+            .map_err(SocksError::IO);
+            boxup(fut)
         },
 
         _ => boxup(future::err(SocksError::Unimplemented)),
@@ -297,8 +299,6 @@ pub struct Socks5;
 
 impl Socks5 {
     pub fn bind(addr: &SocketAddr) {
-        let mut lp = CurrentThread::new();
-
         let listening = TcpListener::bind(addr).unwrap();
         println!("Socks server listening on {}...", addr);
 
@@ -306,10 +306,11 @@ impl Socks5 {
             let addr = stream.peer_addr().unwrap();
             let client = SocksConnection::serve(stream, SimpleConnector);
             (client, addr)
-        });
+        })
+        .map_err(|e| println!("accept faild = {}", e));
 
         let server = clients.for_each(|(client, addr)| {
-            tokio_current_thread::spawn(client.then(move |res| {
+            tokio::spawn(client.then(move |res| {
                 match res {
                     Ok((a, b)) => {
                         info!("proxied {}/{} bytes for {}", a, b, addr);
@@ -321,7 +322,6 @@ impl Socks5 {
             Ok(())
         });
 
-        lp.spawn(server.map_err(|_| ()));
-        lp.run().unwrap()
+        tokio::run(server)
     }
 }
