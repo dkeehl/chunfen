@@ -6,5 +6,6 @@ fn main() {
     let listen_addr = "127.0.0.1:10000";
     let key = b"abc";
 
-    Server::bind(listen_addr, key.to_vec())
+    let addr = listen_addr.parse().unwrap();
+    Server::bind(&addr, key.to_vec())
 }

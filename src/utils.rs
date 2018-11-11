@@ -5,7 +5,6 @@ use std::marker::Sized;
 
 use bytes::{Bytes, BytesMut};
 use tokio_timer::Delay;
-use tokio_timer::timer::Handle;
 use futures::{Future, Stream, Poll};
 use nom::IResult;
 
@@ -51,9 +50,9 @@ pub struct Timer {
 }
 
 impl Timer {
-    pub fn new(t: u64, handle: &Handle) -> Timer {
+    pub fn new(t: u64) -> Timer {
         let t = Duration::from_millis(t);
-        let timeout = handle.delay(Instant::now() + t);
+        let timeout = Delay::new(Instant::now() + t);
         Timer { timeout, duration: t }
     }
 }
