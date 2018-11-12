@@ -26,6 +26,10 @@ pub enum FromPort<T: Debug + Send + 'static> {
 
 #[derive(Debug)]
 pub enum ToPort {
+    HeartBeat,
+    Open,
+    Connect(Bytes),
+    ConnectDN(DomainName, Port),
     ConnectOK(Bytes),
     Data(Bytes),
     ShutdownWrite,

@@ -55,7 +55,7 @@ impl Tunnel {
         let (sender, receiver) = mpsc::channel(1000);
         TcpStream::connect(server).map(|stream| {
             tokio::spawn(run_tunnel(stream, key, receiver));
-            Tunnel { sender, count: 0 }
+            Tunnel { sender, count: 1 }
         })
     }
 
@@ -104,8 +104,6 @@ fn run_tunnel(stream: TcpStream,
             ports: PortMap::new(),
             alive_time: get_time(),
             not_processed: None,
-            server_ready: false,
-            ports_ready: false,
         }
     }).map_err(|e| println!("{}", e))
 }
@@ -116,15 +114,13 @@ struct RunTunnel {
     client: Receiver<FromPort<ClientMsg>>,
     ports: PortMap,
     alive_time: Timespec,
-    not_processed: Option<ServerMsg>,
-    server_ready: bool,
-    ports_ready: bool,
+    not_processed: Option<(Id, ToPort)>,
 }
 
 impl RunTunnel {
-    fn process_server_msg(&mut self, s_msg: ServerMsg) -> Async<()> {
+    fn process_server_msg(&mut self, s_msg: (Id, ToPort)) -> Async<()> {
         debug_assert!(self.not_processed.is_none());
-        if let Err(msg) = self.process_server_msg_prim(s_msg) {
+        if let Err(msg) = self.ports.process(s_msg) {
             self.not_processed = Some(msg);
             Async::NotReady
         } else {
@@ -132,23 +128,6 @@ impl RunTunnel {
         }
     }
 
-    fn process_server_msg_prim(&mut self, s_msg: ServerMsg) -> Result<(), ServerMsg> {
-        match s_msg {
-            ServerMsg::HeartBeatRsp => Ok(()),
-
-            ServerMsg::ConnectOK(id, buf) => 
-                self.ports.send(id, ToPort::ConnectOK(buf)),
-
-            ServerMsg::Data(id, buf) =>
-                self.ports.send(id, ToPort::Data(buf)),
-
-            ServerMsg::ShutdownWrite(id) =>
-                self.ports.send(id, ToPort::ShutdownWrite),
-
-            ServerMsg::ClosePort(id) =>
-                self.ports.send(id, ToPort::Close),
-        }
-    }
 
     fn process_port_msg(&mut self, msg: FromPort<ClientMsg>) {
         let c_msg = match msg {
@@ -188,46 +167,47 @@ impl Future for RunTunnel {
         }
 
         // Timer is not ready.
-        self.server_ready = true;
-        self.ports_ready = true;
-
-        while self.server_ready || self.ports_ready {
-            if self.ports_ready {
-                match self.client.poll().unwrap() {
-                    Async::Ready(Some(msg)) => self.process_port_msg(msg),
-                    // At least one sender should in the socks part.
-                    // If `None` is returned, the socks part should be down, and
-                    // no ports left. No further work to do.
-                    Async::Ready(None) => {
-                        let _ = self.server.poll_flush()?;
-                        return Ok(().into())
-                    },
-                    Async::NotReady => self.ports_ready = false,
-                }
+        loop {
+            match self.client.poll().unwrap() {
+                Async::Ready(Some(msg)) => self.process_port_msg(msg),
+                // At least one sender should in the socks part.
+                // If `None` is returned, the socks part should be down, and
+                // no ports left. No further work to do.
+                Async::Ready(None) => {
+                    let _ = self.server.poll_flush()?;
+                    return Ok(().into())
+                },
+                Async::NotReady => break,
             }
-            if self.server_ready {
-                if let Some(msg) = self.not_processed.take() {
-                    if !self.process_server_msg(msg).is_ready() {
-                        self.server_ready = false;
-                        let _ = self.server.poll_flush()?;
-                        continue
+        }
+        let _ = self.server.poll_flush()?;
+        //let mut count: u16 = 0;
+        //println!("looping...");
+        loop {
+            if let Some(msg) = self.not_processed.take() {
+                if !self.process_server_msg(msg).is_ready() { break }
+            }
+            match self.server.poll()? {
+                Async::Ready(Some(s_msg)) => {
+                    //count += 1;
+                    //println!("get server message {}", s_msg);
+                    self.alive_time = get_time();
+                    if !self.process_server_msg(toport(s_msg)).is_ready() {
+                        break
                     }
-                }
-                match self.server.poll()? {
-                    Async::Ready(Some(s_msg)) => {
-                        trace!("get server message {}", s_msg);
-                        self.alive_time = get_time();
-                        if !self.process_server_msg(s_msg).is_ready() {
-                            self.server_ready = false;
-                        }
-                    },
-                    // Disconnected from server.
-                    Async::Ready(None) => return Err(tunnel_broken()),
-                    Async::NotReady => self.server_ready = false,
-                }
+                },
+                // Disconnected from server.
+                Async::Ready(None) => {
+                    //println!("looped {} messages", count);
+                    return Err(tunnel_broken())
+                },
+                Async::NotReady => {
+                    break
+                },
             }
             let _ = self.server.poll_flush()?;
         }
+        //println!("looped {} messages", count);
         Ok(Async::NotReady)
     }
 }
@@ -251,27 +231,32 @@ impl PortMap {
         let _ = self.ports.remove(&id);
     }
 
-    fn send(&mut self, id: Id, msg: ToPort) -> Result<(), ServerMsg> {
-        use self::ServerMsg::*;
-
-        if let Some(sender) = self.ports.get_mut(&id) {
-            match sender.poll_ready() {
-                Ok(Async::Ready(_)) => Ok(sender.try_send(msg).unwrap()),
-                Ok(Async::NotReady) => {
-                    let s_msg = match msg {
-                        ToPort::ConnectOK(buf) => ConnectOK(id, buf),
-                        ToPort::Data(buf) => Data(id, buf),
-                        ToPort::ShutdownWrite => ShutdownWrite(id),
-                        ToPort::Close => ClosePort(id),
-                    };
-                    Err(s_msg)
-                },
-                Err(_) => { self.remove(id); Ok(()) },
-            }
-        } else {
-            debug!("sending to an nonexist port {}", id);
-            Ok(())
+    fn process(&mut self, msg: (Id, ToPort)) -> Result<(), (Id, ToPort)> {
+        match msg {
+            (0, ToPort::HeartBeat) => Ok(()),
+            (id, msg) => {
+                if let Some(sender) = self.ports.get_mut(&id) {
+                    match sender.poll_ready() {
+                        Ok(Async::Ready(_)) => Ok(sender.try_send(msg).unwrap()),
+                        Ok(Async::NotReady) => Err((id, msg)),
+                        Err(_) => { self.remove(id); Ok(()) },
+                    }
+                } else {
+                    debug!("sending to an nonexist port {}", id);
+                    Ok(())
+                }
+            },
         }
+    }
+}
+
+fn toport(msg: ServerMsg) -> (Id, ToPort) {
+    match msg {
+        ServerMsg::HeartBeatRsp => (0, ToPort::HeartBeat),
+        ServerMsg::ConnectOK(id, buf) => (id, ToPort::ConnectOK(buf)),
+        ServerMsg::Data(id, buf) => (id, ToPort::Data(buf)),
+        ServerMsg::ShutdownWrite(id) => (id, ToPort::ShutdownWrite),
+        ServerMsg::ClosePort(id) => (id, ToPort::Close),
     }
 }
 
