@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use tokio_io::AsyncRead;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use chunfen_socks::{ShutdownWrite, Connector};
 
@@ -40,7 +40,7 @@ pub struct TunnelPort<T: Debug + Send + 'static> {
     id: Id,
     sender: Sender<FromPort<T>>,
     receiver: Receiver<ToPort>,
-    buffer: BytesMut,
+    buffer: Option<Bytes>,
     eof: bool,
 }
 
@@ -53,7 +53,7 @@ impl<T: Debug + Send + 'static> TunnelPort<T> {
             id,
             sender,
             receiver:  rx,
-            buffer: BytesMut::new(),
+            buffer: None,
             eof: false,
         };
         (tx, port)
@@ -106,7 +106,6 @@ impl Connector for TunnelPort<ClientMsg> {
     {
         let addr = format!("{}", addr);
         let buf = Bytes::from(addr.as_bytes());
-        //println!("port {} will connect", self.id);
         let fut = self.send_raw(ClientMsg::Connect(self.id, buf)).and_then(|_| {
             self.to_connect_future()
         });
@@ -144,7 +143,6 @@ impl<T: Debug + Send + 'static> Write for TunnelPort<T> {
         let sender = ready_sender_mut!(self.sender);
         let len = buf.len();
         let data = Bytes::from(buf);
-        // println!("client data size {}", data.len());
         sender.try_send(FromPort::Data(self.id, data)).unwrap();
         Ok(len)
     }
@@ -154,34 +152,34 @@ impl<T: Debug + Send + 'static> Write for TunnelPort<T> {
 
 impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while !self.eof {
-            // TODO:
-            // When the tunnel is closed, we'd like to remove the sender in the
-            // ports map. That will cause the unwrap below panic.
+        while !self.eof && self.buffer.is_none() {
+            // Polling a receiver never gets an error.
             match self.receiver.poll().unwrap() {
                 Async::Ready(Some(msg)) => {
                     match msg {
-                        ToPort::Data(buf) => self.buffer.extend_from_slice(&buf),
+                        ToPort::Data(buf) => self.buffer = Some(buf),
                         ToPort::ShutdownWrite |
                         ToPort::Close     => self.eof = true,
                         _ => {},
                     }
                 },
-                // TODO:
-                // Unexpected EOF
                 Async::Ready(None) => self.eof = true,
                 Async::NotReady => break,
             }
         }
-        match (self.buffer.is_empty(), self.eof) {
-            (false, _) => {
-                let len = self.buffer.len().min(buf.len());
-                buf[..len].copy_from_slice(&self.buffer[..len]);
-                self.buffer.advance(len);
+        match (self.buffer.is_some(), self.eof) {
+            (true, _) => {
+                let mut data = self.buffer.take().unwrap();
+                let len = data.len().min(buf.len());
+                assert!(len > 0);
+                buf[..len].copy_from_slice(&data.split_to(len));
+                if !data.is_empty() {
+                    self.buffer = Some(data)
+                }
                 Ok(len)
             },
-            (true, false) => Err(would_block()),
-            (true, true) => Ok(0),
+            (false, false) => Err(would_block()),
+            (false, true) => Ok(0),
         }
     }
 }
