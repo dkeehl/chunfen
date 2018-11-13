@@ -27,7 +27,7 @@ fn transfer<R, W>(reader: BiLock<R>, writer: BiLock<W>) -> Transfer<R, W>
     Transfer {
         reader,
         writer,
-        buffer: [0u8; 4 * 1024],
+        buffer: Box::new([0u8; 4 * 1024]),
         closing: false,
         top: 0,
         pos: 0,
@@ -37,7 +37,7 @@ fn transfer<R, W>(reader: BiLock<R>, writer: BiLock<W>) -> Transfer<R, W>
 struct Transfer<R, W> {
     reader: BiLock<R>,
     writer: BiLock<W>,
-    buffer: [u8; 4 * 1024],
+    buffer: Box<[u8; 4 * 1024]>,
     closing: bool,
     top: usize,
     pos: usize,
