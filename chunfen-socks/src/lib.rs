@@ -1,8 +1,6 @@
 #![warn(unused)]
 
 #[macro_use]
-extern crate futures;
-#[macro_use]
 extern crate tokio_io;
 #[macro_use]
 extern crate log;
@@ -106,7 +104,7 @@ pub struct SocksConnection;
 
 impl SocksConnection {
     pub fn serve<T>(stream: TcpStream, connector: T)
-        -> impl Future<Item = (usize, usize), Error = SocksError> + Send
+        -> impl Future<Item = (), Error = SocksError> + Send
         where T: Connector + 'static
     {
         trace!("New socks request");
@@ -128,18 +126,15 @@ impl SocksConnection {
                 Some((remote, addr)) => {
                     trace!("Remote connected");
                     let resp = Resp::Success(addr);
-                    let fut = response(stream, &resp).and_then(|stream| {
-                        pipe(stream, remote).map_err(SocksError::IO)
+                    let fut = response(stream, &resp).map(|stream| {
+                        pipe(stream, remote);
                     });
                     boxup(fut)
                 },
                 None => {
                     trace!("Failed to connect remote");
                     let resp = Resp::Fail;
-                    let fut = response(stream, &resp).and_then(|_| {
-                        let dummy: (usize, usize) = (0, 0);
-                        Ok(dummy)
-                    });
+                    let fut = response(stream, &resp).map(|_| ());
                     boxup(fut)
                 },
             }
@@ -310,14 +305,8 @@ impl Socks5 {
         .map_err(|e| println!("accept faild = {}", e));
 
         let server = clients.for_each(|(client, addr)| {
-            tokio::spawn(client.then(move |res| {
-                match res {
-                    Ok((a, b)) => {
-                        info!("proxied {}/{} bytes for {}", a, b, addr);
-                    },
-                    Err(e) => info!("error for {}: {:?}", addr, e),
-                }
-                future::ok(())
+            tokio::spawn(client.map_err(move |e| {
+                info!("error for {}: {:?}", addr, e)
             }));
             Ok(())
         });
