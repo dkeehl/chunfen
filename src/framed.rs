@@ -1,19 +1,16 @@
 use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::time::Duration;
 
 use bytes::BytesMut;
-use futures::{Future, Poll, Async, Stream, Sink, AsyncSink, StartSend};
+use futures::{try_ready, Poll, Async, Stream, Sink, AsyncSink, StartSend};
 use tokio_io::AsyncRead;
-use tokio_timer::{sleep, Delay};
 use nom::Err::Incomplete;
 
-use crate::utils::{Encode, Decode, tunnel_broken};
+use crate::utils::{Encode, Decode};
 
 const INITIAL_CAPACITY: usize = 8 * 1024;
 const BACK_PRESSURE_BOUNDARY: usize = INITIAL_CAPACITY;
 
-// A framed stream with timeout.
 // S: A stream
 // This structure reads the underlying stream, then parsing to data of type I;
 // and can send data of type O.
@@ -22,9 +19,6 @@ pub struct Framed<I, O, S> {
     r_buffer: BytesMut,
     w_buffer: BytesMut,
     may_be_readable: bool,
-    duration: Duration,
-    timeout_alarm: Option<Delay>,
-    closed: bool,
     phantom: PhantomData<(I, O)>,
 }
 
@@ -33,26 +27,14 @@ where I: Decode,
       O: Encode,
       S: AsyncRead + Write
 {
-    pub fn new(stream: S, duration: Duration) -> Framed<I, O, S> {
+    pub fn new(stream: S) -> Framed<I, O, S> {
         Framed {
             stream,
             r_buffer: BytesMut::with_capacity(INITIAL_CAPACITY),
             w_buffer: BytesMut::with_capacity(INITIAL_CAPACITY),
             may_be_readable: false,
-            duration,
-            timeout_alarm: Some(sleep(duration)),
-            closed: false,
             phantom: PhantomData,
         }
-    }
-
-    fn set_alarm(&mut self) {
-        debug_assert!(self.timeout_alarm.is_none());
-        let mut alarm = sleep(self.duration);
-        // regist the task
-        let not_ready = alarm.poll().expect("timer error");
-        assert!(!not_ready.is_ready());
-        self.timeout_alarm = Some(alarm)
     }
 }
 
@@ -94,22 +76,11 @@ where I: Decode,
                 }
             }
 
-            if let Some(mut alarm) = self.timeout_alarm.take() {
-                if alarm.poll().expect("timer error").is_ready() {
-                    self.closed = true;
-                    return Err(tunnel_broken("timeout"))
-                }
-            }
-
             self.r_buffer.reserve(1024);
-            match self.stream.read_buf(&mut self.r_buffer)? {
-                Async::NotReady => {
-                    self.set_alarm();
-                    return Ok(Async::NotReady)
-                }
-                Async::Ready(0) => return Ok(None.into()),
-                Async::Ready(_) => self.may_be_readable = true,
+            if 0 == try_ready!(self.stream.read_buf(&mut self.r_buffer)) {
+                return Ok(None.into())
             }
+            self.may_be_readable = true
         }
     }
 }
@@ -123,9 +94,6 @@ where I: Decode,
     type SinkError = io::Error;
 
     fn start_send(&mut self, msg: O) -> StartSend<O, io::Error> {
-        if self.closed {
-            return Err(tunnel_broken("timeout"))
-        }
         if self.w_buffer.len() > BACK_PRESSURE_BOUNDARY {
             self.poll_complete()?;
             if self.w_buffer.len() > BACK_PRESSURE_BOUNDARY {

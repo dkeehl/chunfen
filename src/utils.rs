@@ -12,8 +12,8 @@ pub type DomainName = Bytes;
 
 pub type Port = u16;
 
-pub fn tunnel_broken(desc: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, desc)
+pub fn tunnel_broken<T: AsRef<str>>(desc: T) -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, desc.as_ref())
 }
 
 macro_rules! drop_res {

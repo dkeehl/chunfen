@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::{Instant, Duration};
 
 use tokio_tcp::{TcpStream, TcpListener};
-use tokio_timer::Delay;
+use tokio_timer::{Timeout, Delay};
 use futures::{Sink, Stream, Future, Poll, Async, AsyncSink, StartSend};
 use futures::sync::mpsc::{self, Sender};
 
@@ -52,7 +52,7 @@ fn run_tunnel(server: &SocketAddr, key: Vec<u8>)
         let (new_port_notifier, new_ports) = mpsc::channel(10);
 
         let timeout = Duration::from_millis(ALIVE_TIMEOUT_TIME_MS);
-        let server: Framed<ServerMsg, ClientMsg, Tls> = Framed::new(tls, timeout);
+        let server: Framed<ServerMsg, ClientMsg, Tls> = Framed::new(tls);
         let heartbeats = HeartBeats::new(HEARTBEAT_INTERVAL_MS as u64);
         let ports = PortMap::new();
 
@@ -60,7 +60,11 @@ fn run_tunnel(server: &SocketAddr, key: Vec<u8>)
         let receiver = receiver.map_err(|_| tunnel_broken(""));
         let new_ports = new_ports.map_err(|_| tunnel_broken(""));
 
-        let read_server = stream.map(t_to_p).select(new_ports).forward(ports);
+        let read_server = Timeout::new(stream, timeout)
+            .map_err(|e| tunnel_broken(format!("{}", e)))
+            .map(t_to_p)
+            .select(new_ports)
+            .forward(ports);
         let write_server = receiver.map(p_to_t).select(heartbeats).forward(sink);
 
         tokio::spawn(read_server.join(write_server).map(|_| {

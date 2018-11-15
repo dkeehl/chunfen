@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio_tcp::{TcpListener, TcpStream};
+use tokio_timer::Timeout;
 use futures::{Sink, Stream, Future, Poll, Async, AsyncSink, StartSend};
 use futures::sync::mpsc::{self, Sender};
 use bytes::Bytes;
@@ -44,12 +45,15 @@ fn new_tunnel(stream: TcpStream, key: &[u8]) -> impl Future<Item=(), Error=()> {
         warn!("tls connect error: {}", e)
     }).map(|tls| {
         let timeout = Duration::from_millis(ALIVE_TIMEOUT_TIME_MS);
-        let client: Framed<ClientMsg, ServerMsg, Tls> = Framed::new(tls, timeout);
+        let client: Framed<ClientMsg, ServerMsg, Tls> = Framed::new(tls);
         let ports = PortMap::new(sender);
         let connections = receiver.map_err(|_| tunnel_broken("port receiver"));
 
         let (sink, stream) = client.split();
-        let read_client = stream.map(t_to_p).forward(ports);
+        let read_client = Timeout::new(stream, timeout)
+            .map_err(|e| tunnel_broken(format!("{}", e)))
+            .map(t_to_p)
+            .forward(ports);
         let write_client = connections.map(p_to_t).forward(sink);
         
         tokio::spawn(read_client.join(write_client).map(|_| {
