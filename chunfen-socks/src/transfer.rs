@@ -1,45 +1,46 @@
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
 use std::net::Shutdown;
 
 use futures::{Async, Poll, Future};
 use futures::sync::BiLock;
-use tokio_io::AsyncRead;
 use tokio_tcp::TcpStream;
-use bytes::BytesMut;
 
+// Panics when called out of a tokio run.
 pub fn pipe<T, S>(a: T, b: S)
-    -> impl Future<Item = (usize, usize), Error = io::Error> + Send
     where
-        T: AsyncRead + Write + ShutdownWrite + Send + 'static,
-        S: AsyncRead + Write + ShutdownWrite + Send + 'static
+        T: Read + Write + ShutdownWrite + Send + 'static,
+        S: Read + Write + ShutdownWrite + Send + 'static
 {
     let (ar, aw) = BiLock::new(a);
     let (br, bw) = BiLock::new(b);
 
-    let half1 = transfer(ar, bw);
-    let half2 = transfer(br, aw);
-    half1.join(half2)
+    let half1 = transfer(ar, bw).map_err(|_| ());
+    let half2 = transfer(br, aw).map_err(|_| ());
+    tokio::spawn(half1);
+    tokio::spawn(half2);
 }
 
 fn transfer<R, W>(reader: BiLock<R>, writer: BiLock<W>) -> Transfer<R, W>
-    where R: AsyncRead + 'static,
+    where R: Read + 'static,
           W: Write + ShutdownWrite + 'static
 {
     Transfer {
         reader,
         writer,
-        buffer: BytesMut::new(),
+        buffer: Box::new([0u8; 4 * 1024]),
         closing: false,
-        wlen: 0,
+        top: 0,
+        pos: 0,
     }
 }
 
 struct Transfer<R, W> {
     reader: BiLock<R>,
     writer: BiLock<W>,
-    buffer: BytesMut,
+    buffer: Box<[u8; 4 * 1024]>,
     closing: bool,
-    wlen: usize,
+    top: usize,
+    pos: usize,
 }
 
 macro_rules! ready {
@@ -52,35 +53,42 @@ macro_rules! ready {
 }
 
 impl<R, W> Future for Transfer<R, W>
-where R: AsyncRead + 'static,
+where R: Read + 'static,
       W: Write + ShutdownWrite + 'static
 {
-    type Item = usize;
+    type Item = ();
     type Error = io::Error;
 
-    fn poll(&mut self) -> Poll<usize, io::Error> {
+    fn poll(&mut self) -> Poll<(), io::Error> {
+        assert!(self.pos <= self.top);
+
         loop {
             if self.closing {
                 let mut writer = ready!(self.writer); 
                 try_nb!(writer.shutdown_write());
-                return Ok(self.wlen.into())
+                return Ok(().into())
             }
 
-            if self.buffer.is_empty() {
-                self.buffer.reserve(2 * 1024);
+            if self.top == 0 {
                 let mut reader = ready!(self.reader);
-                let n = try_ready!(reader.read_buf(&mut self.buffer));
+                let n = try_nb!(reader.read(&mut self.buffer[..]));
                 if n == 0 {
                     self.closing = true;
                     continue
+                } else {
+                    self.top = n
                 }
             }
 
             let mut writer = ready!(self.writer);
-            let n = try_nb!(writer.write(&self.buffer));
+            let n = try_nb!(writer.write(&self.buffer[self.pos..self.top]));
             assert!(n > 0);
-            self.buffer.advance(n);
-            self.wlen += n;
+            self.pos += n;
+
+            if self.pos == self.top {
+                self.pos = 0;
+                self.top = 0
+            }
         }
     }
 }

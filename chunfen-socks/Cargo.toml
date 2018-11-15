@@ -11,7 +11,6 @@ path = "src/bin/main.rs"
 [dependencies]
 log = "0.4"
 futures = "0.1"
-#tokio-current-thread = "0.1"
 tokio = "0.1"
 tokio-tcp = "0.1"
 tokio-io = "0.1"

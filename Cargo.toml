@@ -12,8 +12,7 @@ members = [
 ]
 
 [dependencies]
-time = "*"
-log = { version = "*", features = ["std"] }
+log = "0.4"
 futures = "0.1"
 tokio = "0.1"
 tokio-tcp = "0.1"
@@ -21,5 +20,8 @@ tokio-io = "0.1"
 tokio-timer = "0.2"
 bytes = "0.4"
 nom = "4.1"
+getopts = "0.2"
+fern = "0.5"
+chrono = "0.4"
 chunfen-socks = { path = "chunfen-socks" }
 chunfen-sec = { path = "chunfen-sec" }

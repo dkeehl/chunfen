@@ -1,17 +1,18 @@
 use std::net::SocketAddr;
 use std::io;
 use std::collections::HashMap;
+use std::time::{Instant, Duration};
 
-use time::{Timespec, get_time};
 use tokio_tcp::{TcpStream, TcpListener};
-use futures::{Stream, Future, Poll, Async};
-use futures::sync::mpsc::{self, Sender, Receiver};
+use tokio_timer::Delay;
+use futures::{Sink, Stream, Future, Poll, Async, AsyncSink, StartSend};
+use futures::sync::mpsc::{self, Sender};
 
 use chunfen_sec::client::ClientSession;
 use chunfen_socks::SocksConnection;
 
 use crate::framed::Framed;
-use crate::utils::{Timer, Id};
+use crate::utils::{Id, tunnel_broken};
 use crate::tunnel_port::{ToPort, FromPort, TunnelPort};
 use crate::protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 use crate::tls;
@@ -19,18 +20,16 @@ use crate::tls;
 pub struct Client; 
 
 impl Client {
-    pub fn new(listen_addr: &str, server_addr: &str, key: Vec<u8>) {
-        let listen_addr = listen_addr.parse().unwrap();
-        let server_addr = server_addr.parse().unwrap();
-        let listening = TcpListener::bind(&listen_addr).unwrap();
-        let client = Tunnel::new(&server_addr, key).and_then(|tunnel| {
-            listening.incoming().zip(tunnel).for_each(|(stream, port)| {
+    pub fn new(listen_addr: &SocketAddr, server_addr: &SocketAddr, key: Vec<u8>) {
+        let listening = TcpListener::bind(listen_addr).unwrap();
+        let client = run_tunnel(server_addr, key).and_then(|ports| {
+            listening.incoming().zip(ports).for_each(|(stream, port)| {
                 let proxy = SocksConnection::serve(stream, port);
                 tokio::spawn(drop_res!(proxy));
                 Ok(())
             })
         }).map_err(|e| {
-            eprintln!("{}", e)
+            error!("{}", e)
         });
         
         tokio::run(client)
@@ -39,197 +38,106 @@ impl Client {
 
 type Tls = tls::Tls<ClientSession, TcpStream>;
 
-struct Tunnel {
+fn run_tunnel(server: &SocketAddr, key: Vec<u8>)
+    -> impl Future<Item=Ports, Error=io::Error> + Send
+{
+
+    TcpStream::connect(server).and_then(move |stream| {
+        let session = ClientSession::new(&key);
+        tls::connect(session, stream)
+    }).map(|tls| {
+        // The sender will send messages from ports.
+        let (sender, receiver) = mpsc::channel(1000);
+        // This sender sends new port notifies to the port map.
+        let (new_port_notifier, new_ports) = mpsc::channel(10);
+
+        let timeout = Duration::from_millis(ALIVE_TIMEOUT_TIME_MS);
+        let server: Framed<ServerMsg, ClientMsg, Tls> = Framed::new(tls, timeout);
+        let heartbeats = HeartBeats::new(HEARTBEAT_INTERVAL_MS as u64);
+        let ports = PortMap::new();
+
+        let (sink, stream) = server.split();
+        let receiver = receiver.map_err(|_| tunnel_broken(""));
+        let new_ports = new_ports.map_err(|_| tunnel_broken(""));
+
+        let read_server = stream.map(t_to_p).select(new_ports).forward(ports);
+        let write_server = receiver.map(p_to_t).select(heartbeats).forward(sink);
+
+        tokio::spawn(read_server.join(write_server).map(|_| {
+            info!("finished")
+        }).map_err(|e| {
+            error!("server error: {}", e)
+        }));
+
+        Ports { sender, new_port_notifier, count: 1 }
+    })
+}
+
+fn t_to_p(msg: ServerMsg) -> MapCmd {
+    use self::MapCmd::*;
+    trace!("got {}", msg);
+    match msg {
+        ServerMsg::HeartBeatRsp => HeartBeat,
+        ServerMsg::ClosePort(id) => Close(id),
+        ServerMsg::ConnectOK(id, buf) => Forward { id, msg: ToPort::ConnectOK(buf) },
+        ServerMsg::Data(id, buf) => Forward { id, msg: ToPort::Data(buf) },
+        ServerMsg::ShutdownWrite(id) => Forward { id, msg: ToPort::ShutdownWrite },
+    }
+}
+
+fn p_to_t(msg: FromPort<ClientMsg>) -> ClientMsg {
+    let ret = match msg {
+        FromPort::Data(id, buf) => ClientMsg::Data(id, buf),
+        FromPort::ShutdownWrite(id) => ClientMsg::ShutdownWrite(id),
+        FromPort::Close(id) => ClientMsg::ClosePort(id),
+        FromPort::Payload(m @ ClientMsg::Connect(..)) => m, 
+        FromPort::Payload(m @ ClientMsg::Data(..)) => m,
+        FromPort::Payload(_) => unreachable!(),
+    };
+    trace!("sending {}", ret);
+    ret
+}
+
+struct Ports {
     // This sender rarely sends messages itself, but is used to be cloned to
     // produce tunnel ports.
-    // If this sender get an error when sending messages, we know that the
-    // tunnel is broken.
     sender: Sender<FromPort<ClientMsg>>,
+
+    // This sender sends new port notifies to the port map.
+    // It only sends ToPort::PortOpen.
+    new_port_notifier: Sender<MapCmd>,
     count: u32,
 }
 
-impl Tunnel {
-    fn new(server: &SocketAddr, key: Vec<u8>)
-        -> impl Future<Item=Tunnel, Error=io::Error> + Send
-    {
-        let (sender, receiver) = mpsc::channel(1000);
-        TcpStream::connect(server).map(|stream| {
-            tokio::spawn(run_tunnel(stream, key, receiver));
-            Tunnel { sender, count: 0 }
-        })
-    }
-
-    fn new_port(&mut self) -> Poll<TunnelPort<ClientMsg>, io::Error> {
-        let id = self.count;
-        trace!("new port {}!", id);
-        // Open a channel between the port and the tunnel. The sender is send 
-        // to the tunnel, for sending data later to the corresponing port. 
-        let (sender, port) = TunnelPort::new(id, self.sender.clone());
-
-        // Use poll_ready to determine if the receiver has been dropped.
-        match self.sender.poll_ready() {
-            Ok(Async::Ready(_)) => {
-                self.sender.try_send(FromPort::NewPort(id, sender)).unwrap();
-                self.count += 1;
-                Ok(Async::Ready(port))
-            },
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(_) => Err(tunnel_broken()),
-        }
-    }
-}
-
-impl Stream for Tunnel {
+impl Stream for Ports {
     type Item = TunnelPort<ClientMsg>;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, io::Error> {
-        let port = try_ready!(self.new_port());
-        Ok(Async::Ready(Some(port)))
-    }
-}
+        let id = self.count;
+        //trace!("new port {}!", id);
+        // The sender is used to send messages to the port,
+        // and will be send to the port map.
+        let (sender, port) = TunnelPort::new(id, self.sender.clone());
 
-fn run_tunnel(stream: TcpStream,
-              key: Vec<u8>,
-              receiver: Receiver<FromPort<ClientMsg>>)
-    -> impl Future<Item=(), Error=()> + Send
-{
-    let session = ClientSession::new(&key);
-
-    tls::connect(session, stream).and_then(|tls| {
-        RunTunnel {
-            server: Framed::new(tls),
-            timer: Timer::new(HEARTBEAT_INTERVAL_MS as u64),
-            client: receiver,
-            ports: PortMap::new(),
-            alive_time: get_time(),
-            not_processed: None,
-            server_ready: false,
-            ports_ready: false,
-        }
-    }).map_err(|e| println!("{}", e))
-}
-
-struct RunTunnel {
-    server: Framed<ServerMsg, ClientMsg, Tls>,
-    timer: Timer,
-    client: Receiver<FromPort<ClientMsg>>,
-    ports: PortMap,
-    alive_time: Timespec,
-    not_processed: Option<ServerMsg>,
-    server_ready: bool,
-    ports_ready: bool,
-}
-
-impl RunTunnel {
-    fn process_server_msg(&mut self, s_msg: ServerMsg) -> Async<()> {
-        debug_assert!(self.not_processed.is_none());
-        if let Err(msg) = self.process_server_msg_prim(s_msg) {
-            self.not_processed = Some(msg);
-            Async::NotReady
-        } else {
-            ().into()
-        }
-    }
-
-    fn process_server_msg_prim(&mut self, s_msg: ServerMsg) -> Result<(), ServerMsg> {
-        match s_msg {
-            ServerMsg::HeartBeatRsp => Ok(()),
-
-            ServerMsg::ConnectOK(id, buf) => 
-                self.ports.send(id, ToPort::ConnectOK(buf)),
-
-            ServerMsg::Data(id, buf) =>
-                self.ports.send(id, ToPort::Data(buf)),
-
-            ServerMsg::ShutdownWrite(id) =>
-                self.ports.send(id, ToPort::ShutdownWrite),
-
-            ServerMsg::ClosePort(id) =>
-                self.ports.send(id, ToPort::Close),
-        }
-    }
-
-    fn process_port_msg(&mut self, msg: FromPort<ClientMsg>) {
-        let c_msg = match msg {
-            FromPort::NewPort(id, sender) => {
-                self.ports.insert(id, sender);
-                ClientMsg::OpenPort(id)
+        // Use poll_ready to determine if the receiver has been dropped.
+        match self.new_port_notifier.poll_ready() {
+            Ok(Async::Ready(_)) => {
+                self.new_port_notifier.try_send(MapCmd::Open(id, sender)).unwrap();
+                self.count += 1;
+                Ok(Async::Ready(Some(port)))
             },
-            FromPort::Data(id, buf) => ClientMsg::Data(id, buf),
-            FromPort::ShutdownWrite(id) => ClientMsg::ShutdownWrite(id),
-            FromPort::Close(id) => {
-                self.ports.remove(id);
-                ClientMsg::ClosePort(id)
-            },
-            FromPort::Payload(m @ ClientMsg::Connect(..)) => m, 
-            FromPort::Payload(m @ ClientMsg::Data(..)) => m,
-            FromPort::Payload(_) => unreachable!(),
-        };
-        trace!("sending {}", c_msg);
-        self.server.buffer_msg(c_msg);
-    }
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Err(_) => Ok(Async::Ready(None)),
+        }
+   }
 }
 
-impl Future for RunTunnel {
-    type Item = ();
-    type Error = io::Error;
-
-    fn poll(&mut self) -> Poll<(), io::Error> {
-        if let Async::Ready(_) = self.timer.poll().unwrap() {
-            let dur = get_time() - self.alive_time;
-            if dur.num_milliseconds() > ALIVE_TIMEOUT_TIME_MS {
-                // Server timeout.
-                return Err(tunnel_broken())
-            } else {
-                trace!("sending hearbeat");
-                self.server.buffer_msg(ClientMsg::HeartBeat);
-            }
-        }
-
-        // Timer is not ready.
-        self.server_ready = true;
-        self.ports_ready = true;
-
-        while self.server_ready || self.ports_ready {
-            if self.ports_ready {
-                match self.client.poll().unwrap() {
-                    Async::Ready(Some(msg)) => self.process_port_msg(msg),
-                    // At least one sender should in the socks part.
-                    // If `None` is returned, the socks part should be down, and
-                    // no ports left. No further work to do.
-                    Async::Ready(None) => {
-                        let _ = self.server.poll_flush()?;
-                        return Ok(().into())
-                    },
-                    Async::NotReady => self.ports_ready = false,
-                }
-            }
-            if self.server_ready {
-                if let Some(msg) = self.not_processed.take() {
-                    if !self.process_server_msg(msg).is_ready() {
-                        self.server_ready = false;
-                        let _ = self.server.poll_flush()?;
-                        continue
-                    }
-                }
-                match self.server.poll()? {
-                    Async::Ready(Some(s_msg)) => {
-                        trace!("get server message {}", s_msg);
-                        self.alive_time = get_time();
-                        if !self.process_server_msg(s_msg).is_ready() {
-                            self.server_ready = false;
-                        }
-                    },
-                    // Disconnected from server.
-                    Async::Ready(None) => return Err(tunnel_broken()),
-                    Async::NotReady => self.server_ready = false,
-                }
-            }
-            let _ = self.server.poll_flush()?;
-        }
-        Ok(Async::NotReady)
-    }
+enum MapCmd {
+    HeartBeat,
+    Open(Id, Sender<ToPort>),
+    Close(Id),
+    Forward { id: Id, msg: ToPort }
 }
 
 struct PortMap {
@@ -238,9 +146,7 @@ struct PortMap {
 
 impl PortMap {
     fn new() -> PortMap {
-        PortMap {
-            ports: HashMap::new(),
-        }
+        PortMap { ports: HashMap::new() }
     }
 
     fn insert(&mut self, id: Id, sender: Sender<ToPort>) {
@@ -250,32 +156,69 @@ impl PortMap {
     fn remove(&mut self, id: Id) {
         let _ = self.ports.remove(&id);
     }
+}
 
-    fn send(&mut self, id: Id, msg: ToPort) -> Result<(), ServerMsg> {
-        use self::ServerMsg::*;
+impl Sink for PortMap {
+    type SinkItem = MapCmd;
+    type SinkError = io::Error;
 
-        if let Some(sender) = self.ports.get_mut(&id) {
-            match sender.poll_ready() {
-                Ok(Async::Ready(_)) => Ok(sender.try_send(msg).unwrap()),
-                Ok(Async::NotReady) => {
-                    let s_msg = match msg {
-                        ToPort::ConnectOK(buf) => ConnectOK(id, buf),
-                        ToPort::Data(buf) => Data(id, buf),
-                        ToPort::ShutdownWrite => ShutdownWrite(id),
-                        ToPort::Close => ClosePort(id),
-                    };
-                    Err(s_msg)
-                },
-                Err(_) => { self.remove(id); Ok(()) },
-            }
-        } else {
-            debug!("sending to an nonexist port {}", id);
-            Ok(())
+    fn start_send(&mut self, cmd: MapCmd) -> StartSend<MapCmd, io::Error> {
+        use self::MapCmd::*;
+
+        match cmd {
+            HeartBeat => {},
+            Open(id, sender) => self.insert(id, sender),
+            // A port get a message only when it is at read, write or connect
+            // operation, at which time it knows if all senders are dropped.
+            // But it has only one sender, the one in this map.
+            // So it's safe to just remove the sender without sending a Close
+            // message.
+            Close(id) => self.remove(id),
+            Forward { id, msg } => {
+                if let Some(sender) = self.ports.get_mut(&id) {
+                    match sender.poll_ready() {
+                        Ok(Async::Ready(_)) => sender.try_send(msg).unwrap(),
+                        Ok(Async::NotReady) =>
+                            return Ok(AsyncSink::NotReady(Forward { id, msg })),
+                        Err(_) => self.remove(id),
+                    }
+                } else {
+                    debug!("sending to an nonexist port {}", id);
+                }
+            },
         }
+        Ok(AsyncSink::Ready)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), io::Error> { Ok(().into()) }
+}
+
+pub struct HeartBeats {
+    timeout: Delay,
+    duration: Duration,
+}
+
+impl HeartBeats {
+    pub fn new(t: u64) -> HeartBeats {
+        let t = Duration::from_millis(t);
+        let timeout = Delay::new(Instant::now() + t);
+        HeartBeats{ timeout, duration: t }
     }
 }
 
-fn tunnel_broken() -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, "Tunnel broken")
-}
+impl Stream for HeartBeats {
+    type Item = ClientMsg;
+    type Error = io::Error;
 
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        match self.timeout.poll() {
+            Ok(Async::Ready(_)) => {
+                let next = Instant::now() + self.duration;
+                self.timeout.reset(next);
+                Ok(Some(ClientMsg::HeartBeat).into())
+            },
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Err(_) => Ok(None.into()),
+        }
+    }
+}

@@ -6,7 +6,7 @@ use bytes::{BufMut, BytesMut, Bytes};
 use crate::utils::{Id, DomainName, Port, Encode, Decode};
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 5000;
-pub const ALIVE_TIMEOUT_TIME_MS: i64 = 60000;
+pub const ALIVE_TIMEOUT_TIME_MS: u64 = 60000;
 
 mod c {
     pub const OPEN_PORT: u8 = 1;
