@@ -13,6 +13,8 @@ mod protocol;
 mod framed;
 mod tunnel_port;
 mod tls;
+mod client;
+mod server;
 
-pub mod client;
-pub mod server;
+pub use crate::client::Client;
+pub use crate::server::Server;
