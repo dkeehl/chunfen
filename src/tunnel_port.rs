@@ -16,7 +16,6 @@ use crate::protocol::ClientMsg;
 
 #[derive(Debug)]
 pub enum FromPort<T: Debug + Send + 'static> {
-    NewPort(Id, Sender<ToPort>),
     Data(Id, Bytes),
     ShutdownWrite(Id),
     Close(Id),
@@ -158,8 +157,8 @@ impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
                 Async::Ready(Some(msg)) => {
                     match msg {
                         ToPort::Data(buf) => self.buffer = Some(buf),
-                        ToPort::ShutdownWrite |
-                        ToPort::Close     => self.eof = true,
+                        ToPort::ShutdownWrite => self.eof = true,
+                        ToPort::Close     => unreachable!(),
                         _ => {},
                     }
                 },

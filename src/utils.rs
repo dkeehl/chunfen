@@ -1,11 +1,9 @@
-use std::time::{Instant, Duration};
+use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::from_utf8;
 use std::marker::Sized;
 
 use bytes::{Bytes, BytesMut};
-use tokio_timer::Delay;
-use futures::{Future, Stream, Poll};
 use nom::IResult;
 
 pub type Id = u32;
@@ -13,6 +11,10 @@ pub type Id = u32;
 pub type DomainName = Bytes;
 
 pub type Port = u16;
+
+pub fn tunnel_broken(desc: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, desc)
+}
 
 macro_rules! drop_res {
     ($fut:expr) => ($fut.map(|_| ()).map_err(|_| ()))
@@ -42,30 +44,3 @@ pub fn parse_domain_name(dn: DomainName) -> Option<SocketAddr> {
     let mut addr = string.to_socket_addrs().unwrap();
     addr.nth(0)
 }
-
-// Timer
-pub struct Timer {
-    timeout: Delay,
-    duration: Duration,
-}
-
-impl Timer {
-    pub fn new(t: u64) -> Timer {
-        let t = Duration::from_millis(t);
-        let timeout = Delay::new(Instant::now() + t);
-        Timer { timeout, duration: t }
-    }
-}
-
-impl Stream for Timer {
-    type Item = ();
-    type Error = tokio_timer::Error;
-
-    fn poll(&mut self) -> Poll<Option<()>, Self::Error> {
-        try_ready!(self.timeout.poll());
-        let next = Instant::now() + self.duration;
-        self.timeout.reset(next);
-        Ok(Some(()).into())
-    }
-}
-
