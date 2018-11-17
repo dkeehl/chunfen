@@ -5,14 +5,15 @@ use std::str::from_utf8;
 use std::fmt::Debug;
 
 use tokio_io::AsyncRead;
+use tokio_tcp::TcpStream;
 use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::Bytes;
 
-use chunfen_socks::{ShutdownWrite, Connector};
+use chunfen_socks::{ShutdownWrite, Connector, pipe};
 
 use crate::utils::{DomainName, Port, Id};
-use crate::protocol::ClientMsg;
+use crate::protocol::{ServerMsg, ClientMsg};
 
 #[derive(Debug)]
 pub enum FromPort<T: Debug + Send + 'static> {
@@ -36,6 +37,34 @@ pub struct TunnelPort<T: Debug + Send + 'static> {
     receiver: Receiver<ToPort>,
     buffer: Option<Bytes>,
     eof: bool,
+}
+
+impl TunnelPort<ServerMsg> {
+    pub fn connect_and_proxy(self, id: Id, addr: &SocketAddr)
+        -> impl Future<Item=(), Error=()> + Send
+    {
+        use self::ServerMsg::*;
+        use self::FromPort::*;
+
+        let sender = self.sender.clone();
+        TcpStream::connect(addr).then(move |res| {
+            match res {
+                Ok(stream) => {
+                    let bind_addr = format!("{}", stream.local_addr().unwrap());
+                    let buf = Bytes::from(bind_addr.as_bytes());
+                    let fut = sender.send(Payload(ConnectOK(id, buf))).map(|_| {
+                        pipe(stream, self)
+                    }).map_err(|_| ());
+                    Box::new(fut) as Box<Future<Item=(), Error=()> + Send>
+                },
+                Err(_) => {
+                    let buf = Bytes::new();
+                    let fut = sender.send(Payload(ConnectOK(id, buf))); 
+                    Box::new(drop_res!(fut)) as Box<Future<Item=(), Error=()> + Send>
+                },
+            }
+        })
+    }
 }
 
 impl<T: Debug + Send + 'static> TunnelPort<T> {

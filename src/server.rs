@@ -10,7 +10,6 @@ use futures::sync::mpsc::{self, Sender};
 use bytes::Bytes;
 
 use chunfen_sec::ServerSession;
-use chunfen_socks::pipe;
 
 use crate::utils::{*, Id, DomainName, Port}; 
 use crate::protocol::{ServerMsg, ClientMsg, ALIVE_TIMEOUT_TIME_MS};
@@ -93,10 +92,6 @@ fn t_to_p(msg: ClientMsg) -> MapCmd {
     }
 }
 
-fn connection_fail(id: Id) -> ServerMsg {
-    ServerMsg::ConnectOK(id, Bytes::new())
-}
-
 struct PortMap {
     // a port is created after it connected.
     ports: HashMap<Id, Option<Sender<ToPort>>>,
@@ -126,26 +121,7 @@ impl PortMap {
 
         // Spawn a new task to connect, to avoid the connect action blocking the
         // main thread.
-        let connect = TcpStream::connect(&addr);
-        let proxing = connect.then(move |res| {
-            match res {
-                Ok(stream) => {
-                    let bind_addr = format!("{}", stream.local_addr().unwrap());
-                    //println!("{}", bind_addr);
-                    let buf = Bytes::from(bind_addr.as_bytes());
-                    let fut = port.send_raw(ServerMsg::ConnectOK(id, buf)).map(|_| {
-                        pipe(stream, port)
-                    });
-                    Box::new(drop_res!(fut)) as Box<Future<Item=(), Error=()> + Send>
-                },
-                Err(_) => {
-                    let fut = port.send_raw(connection_fail(id));
-                    Box::new(drop_res!(fut)) as Box<Future<Item=(), Error=()> + Send>
-                },
-            }
-        });
-        //println!("connecting port {}", id);
-        tokio::spawn(proxing);
+        tokio::spawn(port.connect_and_proxy(id, &addr));
     }
 
     fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port) {
@@ -178,6 +154,10 @@ impl PortMap {
         // FIXME; Messages may lost.
         let _ = self.sender.try_send(FromPort::Payload(msg));
     }
+}
+
+fn connection_fail(id: Id) -> ServerMsg {
+    ServerMsg::ConnectOK(id, Bytes::new())
 }
 
 enum MapCmd {
