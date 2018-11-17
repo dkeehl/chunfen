@@ -8,7 +8,7 @@ use tokio_timer::{Timeout, Delay};
 use futures::{Sink, Stream, Future, Poll, Async, AsyncSink, StartSend};
 use futures::sync::mpsc::{self, Sender};
 
-use chunfen_sec::client::ClientSession;
+use chunfen_sec::ClientSession;
 use chunfen_socks::SocksConnection;
 
 use crate::framed::Framed;
@@ -57,8 +57,8 @@ fn run_tunnel(server: &SocketAddr, key: Vec<u8>)
         let ports = PortMap::new();
 
         let (sink, stream) = server.split();
-        let receiver = receiver.map_err(|_| tunnel_broken(""));
-        let new_ports = new_ports.map_err(|_| tunnel_broken(""));
+        let receiver = receiver.map_err(|_| unreachable!());
+        let new_ports = new_ports.map_err(|_| unreachable!());
 
         let read_server = Timeout::new(stream, timeout)
             .map_err(|e| tunnel_broken(format!("{}", e)))
@@ -81,7 +81,7 @@ fn t_to_p(msg: ServerMsg) -> MapCmd {
     use self::MapCmd::*;
     trace!("got {}", msg);
     match msg {
-        ServerMsg::HeartBeatRsp => HeartBeat,
+        ServerMsg::HeartBeatRsp => Skip,
         ServerMsg::ClosePort(id) => Close(id),
         ServerMsg::ConnectOK(id, buf) => Forward { id, msg: ToPort::ConnectOK(buf) },
         ServerMsg::Data(id, buf) => Forward { id, msg: ToPort::Data(buf) },
@@ -138,7 +138,7 @@ impl Stream for Ports {
 }
 
 enum MapCmd {
-    HeartBeat,
+    Skip,
     Open(Id, Sender<ToPort>),
     Close(Id),
     Forward { id: Id, msg: ToPort }
@@ -170,7 +170,7 @@ impl Sink for PortMap {
         use self::MapCmd::*;
 
         match cmd {
-            HeartBeat => {},
+            Skip => {},
             Open(id, sender) => self.insert(id, sender),
             // A port get a message only when it is at read, write or connect
             // operation, at which time it knows if all senders are dropped.

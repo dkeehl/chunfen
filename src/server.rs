@@ -9,7 +9,7 @@ use futures::{Sink, Stream, Future, Poll, Async, AsyncSink, StartSend};
 use futures::sync::mpsc::{self, Sender};
 use bytes::Bytes;
 
-use chunfen_sec::server::ServerSession;
+use chunfen_sec::ServerSession;
 use chunfen_socks::pipe;
 
 use crate::utils::{*, Id, DomainName, Port}; 
@@ -48,7 +48,7 @@ fn new_tunnel(stream: TcpStream, key: &[u8]) -> impl Future<Item=(), Error=()> {
         let timeout = Duration::from_millis(ALIVE_TIMEOUT_TIME_MS);
         let client: Framed<ClientMsg, ServerMsg, Tls> = Framed::new(tls);
         let ports = PortMap::new(sender);
-        let connections = receiver.map_err(|_| tunnel_broken("port receiver"));
+        let connections = receiver.map_err(|_| unreachable!());
 
         let (sink, stream) = client.split();
         let read_client = Timeout::new(stream, timeout)

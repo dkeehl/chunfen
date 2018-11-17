@@ -25,14 +25,9 @@ pub enum FromPort<T: Debug + Send + 'static> {
 
 #[derive(Debug)]
 pub enum ToPort {
-    HeartBeat,
-    Open,
-    Connect(Bytes),
-    ConnectDN(DomainName, Port),
     ConnectOK(Bytes),
     Data(Bytes),
     ShutdownWrite,
-    Close,
 }
 
 pub struct TunnelPort<T: Debug + Send + 'static> {
@@ -158,7 +153,6 @@ impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
                     match msg {
                         ToPort::Data(buf) => self.buffer = Some(buf),
                         ToPort::ShutdownWrite => self.eof = true,
-                        ToPort::Close     => unreachable!(),
                         _ => {},
                     }
                 },
