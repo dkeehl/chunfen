@@ -1,9 +1,10 @@
+use std::fmt;
+use ring::digest;
+
 use crate::data::{ContentType, PlainText, TLSError,};
 use crate::utils::codec::{Reader, Codec, self,};
 
-use ring::digest;
-
-enum_builder! {@U8
+enum_builder! {
     EnumName: HandshakeType;
     EnumVal{
         //HelloRequest => 0x00,
@@ -18,7 +19,7 @@ enum_builder! {@U8
         //CertificateRequest => 0x0d,
         ServerHelloDone => 0x0e,
         //CertificateVerify => 0x0f,
-        ClientKeyExchange => 0x10,
+        //ClientKeyExchange => 0x10,
         Finished => 0x14
         //CertificateURL => 0x15,
         //CertificateStatus => 0x16,
@@ -51,8 +52,19 @@ pub enum Handshake {
     ClientHello(Random),
     ServerHello(Random),
     ServerHelloDone,
-    ClientKeyExchange(Vec<u8>),
     Finished(Hash),
+}
+
+impl fmt::Display for Handshake {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::Handshake::*;
+        match self {
+            ClientHello(..) => write!(f, "Handshake: ClientHello"),
+            ServerHello(..) => write!(f, "Handshake: ServerHello"),
+            ServerHelloDone => write!(f, "Handshake: ServerHelloDone"),
+            Finished(..) => write!(f, "Handshake: Finished"),
+        }
+    }
 }
 
 impl Handshake {
@@ -86,11 +98,6 @@ impl Codec for Handshake {
                 HandshakeType::ServerHelloDone.encode(bytes);
                 codec::u24(0).encode(bytes);
             }
-            Handshake::ClientKeyExchange(ref sec) => {
-                HandshakeType::ClientKeyExchange.encode(bytes);
-                codec::u24(sec.len() as u32).encode(bytes);
-                bytes.extend_from_slice(sec);
-            }
             Handshake::Finished(ref data) => {
                 HandshakeType::Finished.encode(bytes);
                 codec::u24(data.len() as u32).encode(bytes);
@@ -118,8 +125,6 @@ impl Codec for Handshake {
                 } else {
                     Some(Handshake::ServerHelloDone)
                 },
-            HandshakeType::ClientKeyExchange =>
-                Some(Handshake::ClientKeyExchange(sub.to_vec())),
 
             HandshakeType::Finished =>
                 Some(Handshake::Finished(sub.to_vec())),

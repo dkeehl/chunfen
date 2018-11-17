@@ -3,10 +3,9 @@ use std::error::Error;
 
 use crate::utils::codec::{Reader, Codec};
 
-enum_builder! {@U8
+enum_builder! {
     EnumName: ContentType;
     EnumVal {
-        ChangeCipherSpec => 0x14,
         Alert => 0x15,
         Handshake => 0x16,
         ApplicationData => 0x17
@@ -17,6 +16,20 @@ enum_builder! {@U8
 pub struct PlainText {
     pub content_type: ContentType,
     pub fragment: Vec<u8>,
+}
+
+impl fmt::Display for PlainText {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::ContentType::*;
+
+        let PlainText { ref content_type, ref fragment } = self;
+        match content_type {
+            Alert => write!(f, "Alert"),
+            Handshake => write!(f, "Handshake"),
+            ApplicationData => write!(f, "ApplicationData of size {}", fragment.len()),
+            Unknown(n) => write!(f, "Unknown content type: {}", n),
+        }
+    }
 }
 
 impl PlainText {
@@ -117,7 +130,7 @@ impl Codec for CipherText {
     }
 }
 
-enum_builder! {@U8
+enum_builder! {
     EnumName: AlertDescription;
     EnumVal {
         CloseNotify => 0x00

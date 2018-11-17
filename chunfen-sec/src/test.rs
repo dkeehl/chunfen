@@ -9,6 +9,7 @@ use std::thread;
 
 use log::{self, Record, Metadata, Level, SetLoggerError};
 
+#[allow(dead_code)]
 struct SimpleLogger;
 
 impl log::Log for SimpleLogger {
@@ -22,6 +23,7 @@ impl log::Log for SimpleLogger {
 }
 
 impl SimpleLogger {
+    #[allow(dead_code)]
     fn init() -> Result<(), SetLoggerError> {
         log::set_boxed_logger(Box::new(SimpleLogger))?;
         log::set_max_level(Level::Trace.to_level_filter());

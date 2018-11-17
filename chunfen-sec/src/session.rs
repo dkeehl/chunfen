@@ -96,10 +96,11 @@ pub struct SessionCommon {
 
     suite: Option<&'static SupportedCipherSuite>,
     key_schedule: Option<KeySchedule>,
+    shared_key: Vec<u8>,
 }
 
 impl SessionCommon {
-    pub fn new() -> SessionCommon {
+    pub fn new(key: &[u8]) -> SessionCommon {
         SessionCommon {
             traffic: false,
             peer_eof: false,
@@ -109,8 +110,6 @@ impl SessionCommon {
             received_plaintext: VecBuffer::new(),
             msg_deframer: MsgDeframer::new(),
 
-            //handshake_joiner: HandshakeJoiner::new(),
-
             write_seq: 0,
             read_seq: 0,
             msg_encryptor: MsgEncryptor::plain(),
@@ -119,6 +118,7 @@ impl SessionCommon {
             // TODO: negotiate to determin a suite
             suite: Some(&TLS13_AES_128_GCM_SHA256), 
             key_schedule: None,
+            shared_key: Vec::from(key),
         }
     }
 
@@ -236,32 +236,37 @@ impl SessionCommon {
     pub fn set_msg_decryptor(&mut self, dec: Box<MsgDecryptor>) {
         self.msg_decryptor = dec;
     }
+
+    pub fn get_shared_key(&self) -> &[u8] {
+        &self.shared_key
+    }
 }
 
-macro_rules! impl_session {
-    ($session: ident, $state: ty) => {
+pub trait Handler {
+    type State: Send + 'static;
+
+    fn handle(&mut self, state: Self::State, msg: PlainText)
+        -> Result<Self::State, TLSError>;
+}
+
+macro_rules! session_struct {
+    ($session:ident with state : $state:ty) => {
         pub struct $session {
             common: SessionCommon,
-            state: Option<Box<$state>>,
-            shared_key: Vec<u8>
+            state: Option<$state>,
         }
 
         impl $session {
-            fn send_msg(&mut self, msg: PlainText) {
-                self.common.send_msg(msg)
-            }
-
             fn process_msg(&mut self, msg: PlainText) -> Result<(), TLSError> {
                 match msg.content_type {
                     ContentType::Alert => self.common.process_alert(msg),
-
                     _ => self.process_main_protocol(msg),
                 }
             }
 
             fn process_main_protocol(&mut self, msg: PlainText) -> Result<(), TLSError> {
                 let state = self.state.take().unwrap();
-                match state.handle(self, msg) {
+                match self.handle(state, msg) {
                     Ok(new_state) => {
                         self.state = Some(new_state);
                         Ok(())

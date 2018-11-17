@@ -14,13 +14,13 @@ mod handshake;
 mod key_schedule;
 mod suites;
 mod utils;
-
-pub mod stream;
-pub mod client;
-pub mod server;
-
+mod client;
+mod server;
 #[cfg(test)]
 mod test;
+pub mod stream;
 
 pub use crate::data::TLSError;
 pub use crate::session::Session;
+pub use crate::client::ClientSession;
+pub use crate::server::ServerSession;
