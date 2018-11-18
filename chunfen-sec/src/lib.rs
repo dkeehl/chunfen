@@ -1,7 +1,7 @@
-/// A very limited subset of TLS
+// A very limited subset of TLS
+#![warn(unused)]
 #[macro_use]
 extern crate log;
-extern crate ring;
 
 #[macro_use]
 mod macros;
