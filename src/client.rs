@@ -16,11 +16,12 @@ use crate::utils::{Id, tunnel_broken};
 use crate::tunnel_port::{ToPort, FromPort, TunnelPort};
 use crate::protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 use crate::tls;
+use crate::checked_key::CheckedKey;
 
 pub struct Client; 
 
 impl Client {
-    pub fn new(listen_addr: &SocketAddr, server_addr: &SocketAddr, key: Vec<u8>) {
+    pub fn new(listen_addr: &SocketAddr, server_addr: &SocketAddr, key: CheckedKey) {
         let listening = TcpListener::bind(listen_addr).unwrap();
         let client = run_tunnel(server_addr, key).and_then(|ports| {
             listening.incoming().zip(ports).for_each(|(stream, port)| {
@@ -38,12 +39,11 @@ impl Client {
 
 type Tls = tls::Tls<ClientSession, TcpStream>;
 
-fn run_tunnel(server: &SocketAddr, key: Vec<u8>)
+fn run_tunnel(server: &SocketAddr, key: CheckedKey)
     -> impl Future<Item=Ports, Error=io::Error> + Send
 {
-
-    TcpStream::connect(server).and_then(move |stream| {
-        let session = ClientSession::new(&key);
+    TcpStream::connect(server).and_then(|stream| {
+        let session = ClientSession::new(key.into());
         tls::connect(session, stream)
     }).map(|tls| {
         // The sender will send messages from ports.

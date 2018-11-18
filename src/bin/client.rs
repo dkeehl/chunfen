@@ -48,7 +48,11 @@ fn main() {
             }
         };
 
-    let key = matches.opt_str("k").unwrap().into_bytes();
+    let key_str = matches.opt_str("k").unwrap();
+    let key = match chunfen::checked_key::check(key_str) {
+        Ok(k) => k,
+        Err(e) => { println!("{}", e); return }
+    };
     
     if matches.opt_present("log") {
         let _ = match matches.opt_str("l").and_then(|path| {

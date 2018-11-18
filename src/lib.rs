@@ -15,6 +15,7 @@ mod tunnel_port;
 mod tls;
 mod client;
 mod server;
+pub mod checked_key;
 
 pub use crate::client::Client;
 pub use crate::server::Server;

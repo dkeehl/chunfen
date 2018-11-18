@@ -293,8 +293,8 @@ mod test {
     use super::{id, sized, parse_server_msg, parse_client_msg};
     use nom::Err::Incomplete;
     use nom::Needed::Size;
-    use bytes::BytesMut;
-    use Encode;
+    use bytes::{BytesMut, Bytes};
+    use crate::utils::Encode;
 
     #[test]
     fn parse_id() {
@@ -304,8 +304,7 @@ mod test {
 
     #[test]
     fn parse_sized() {
-        let mut buf = BytesMut::new();
-        buf.extend_from_slice(&[3, 4][..]);
+        let buf = Bytes::from(&[3, 4][..]);
         assert_eq!(sized(&[0, 0, 0, 2, 3, 4]), Ok((&[][..], buf)));
         assert_eq!(sized(&[0, 0, 1, 0, 2, 3]), Err(Incomplete(Size(256))));
     }
@@ -315,7 +314,7 @@ mod test {
         use crate::protocol::ClientMsg::*;
 
         let buf: [u8; 4] = [1,2,3,4];
-        let buf = BytesMut::from(&buf[..]);
+        let buf = Bytes::from(&buf[..]);
 
         let msgs = [
             HeartBeat,
@@ -328,7 +327,8 @@ mod test {
         ];
 
         for msg in msgs.iter() {
-            let buf: BytesMut = msg.encode();
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf);
             let (remain, val) = parse_client_msg(&buf).unwrap(); 
             assert_eq!(remain, &[][..]);
             assert_eq!(&val, msg);
@@ -340,7 +340,7 @@ mod test {
         use crate::protocol::ServerMsg::*;
 
         let buf: [u8; 4] = [1,2,3,4];
-        let buf = BytesMut::from(&buf[..]);
+        let buf = Bytes::from(&buf[..]);
 
         let msgs = [
             HeartBeatRsp,
@@ -351,7 +351,8 @@ mod test {
         ];
 
         for msg in msgs.iter() {
-            let buf: BytesMut = msg.encode();
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf);
             let (remain, val) = parse_server_msg(&buf).unwrap();
             assert_eq!(remain, &[][..]);
             assert_eq!(&val, msg);

@@ -16,16 +16,17 @@ use crate::protocol::{ServerMsg, ClientMsg, ALIVE_TIMEOUT_TIME_MS};
 use crate::framed::Framed;
 use crate::tunnel_port::{TunnelPort, FromPort, ToPort};
 use crate::tls;
+use crate::checked_key::CheckedKey;
 
 pub struct Server;
 
 impl Server {
-    pub fn bind(addr: &SocketAddr, key: Vec<u8>) {
+    pub fn bind(addr: &SocketAddr, key: CheckedKey) {
         let listening = TcpListener::bind(addr).unwrap();
         let server = listening.incoming().map_err(|e| {
             error!("accepting error {}", e)
         }).for_each(move |stream| {
-            tokio::spawn(new_tunnel(stream, &key));
+            tokio::spawn(new_tunnel(stream, key.clone()));
             Ok(())
         });
 
@@ -35,10 +36,10 @@ impl Server {
 
 type Tls = tls::Tls<ServerSession, TcpStream>;
 
-fn new_tunnel(stream: TcpStream, key: &[u8]) -> impl Future<Item=(), Error=()> {
+fn new_tunnel(stream: TcpStream, key: CheckedKey) -> impl Future<Item=(), Error=()> {
     info!("Request from {}, creat new tunnel.", stream.peer_addr().unwrap());
 
-    let session = ServerSession::new(key);
+    let session = ServerSession::new(key.into());
     let (sender, receiver) = mpsc::channel(1000);
 
     tls::connect(session, stream).map_err(|e| {
