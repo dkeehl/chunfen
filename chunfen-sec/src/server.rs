@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 
 use ring::constant_time;
 
-use crate::data::{PlainText, TLSError, ContentType, AlertDescription};
+use crate::data::{PlainText, TLSError, ContentType};
 use crate::session::{Session, SessionCommon, Handler};
 use crate::handshake::{Handshake, extract_handshake, Hash,};
 use crate::key_schedule::{SecretKind, KeySchedule,};

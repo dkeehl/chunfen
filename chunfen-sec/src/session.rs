@@ -77,6 +77,9 @@ pub trait Session: Read + Write {
     }
 }
 
+static SEQ_SOFT_LIMIT: u64 = 0xffff_ffff_ffff_0000u64;
+static SEQ_HARD_LIMIT: u64 = 0xffff_ffff_ffff_fffeu64;
+
 pub struct SessionCommon {
     pub traffic: bool,
     pub peer_eof: bool,
@@ -154,6 +157,14 @@ impl SessionCommon {
     }
 
     fn send_single_fragment(&mut self, m: BorrowedMessage) {
+        if self.write_seq == SEQ_SOFT_LIMIT {
+            self.send_close_notify()
+        }
+
+        if self.write_seq >= SEQ_HARD_LIMIT {
+            return
+        }
+
         let em = self.encrypt_outgoing(m);
         self.queue_tls_message(em);
     }
@@ -178,10 +189,19 @@ impl SessionCommon {
     }
 
     pub fn decrypt_incoming(&mut self, msg: CipherText)
-        -> Result<PlainText, TLSError> {
+        -> Result<PlainText, TLSError>
+    {
+        if self.read_seq == SEQ_SOFT_LIMIT {
+            self.send_close_notify()
+        }
+
         let seq = self.read_seq;
         self.read_seq += 1;
         self.msg_decryptor.decrypt(msg, seq)
+    }
+
+    pub fn send_close_notify(&mut self) {
+        self.send_alert(AlertDescription::CloseNotify)
     }
 
     fn encrypt_outgoing(&mut self, plain: BorrowedMessage) -> CipherText {
@@ -205,7 +225,7 @@ impl SessionCommon {
         }
     }
 
-    pub fn send_alert(&mut self, alert: AlertDescription) {
+    fn send_alert(&mut self, alert: AlertDescription) {
         let m = PlainText::build_alert(alert);
         self.send_msg(m);
     }
@@ -310,7 +330,7 @@ macro_rules! session_struct {
             }
 
             fn send_close_notify(&mut self) {
-                self.common.send_alert(AlertDescription::CloseNotify)
+                self.common.send_close_notify()
             }
 
             fn want_to_write(&self) -> bool {
