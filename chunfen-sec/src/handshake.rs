@@ -144,40 +144,14 @@ pub fn extract_handshake(msg: &PlainText) -> Result<Handshake, TLSError> {
     }
 }
 
-pub struct HandshakeDetails {
-    pub error: Option<TLSError>,
-    transcript: HandshakeHash,
-}
-
-impl HandshakeDetails {
-    pub fn new() -> HandshakeDetails {
-        HandshakeDetails {
-            error: None,
-            transcript: HandshakeHash::new(),
-        }
-    }
-
-    pub fn start_hash(&mut self, alg: &'static digest::Algorithm) {
-        self.transcript.start_hash(alg)
-    }
-
-    pub fn add_message(&mut self, msg: &PlainText) {
-        self.transcript.add_message(msg)
-    }
-
-    pub fn get_current_hash(&self) -> Vec<u8> {
-        self.transcript.get_current_hash()
-    }
-}
-
-struct HandshakeHash {
+pub struct HandshakeHash {
     alg: Option<&'static digest::Algorithm>,
     ctx: Option<digest::Context>,
     buffer: Vec<u8>,
 }
 
 impl HandshakeHash {
-    fn new() -> HandshakeHash {
+    pub fn new() -> HandshakeHash {
         HandshakeHash {
             alg: None,
             ctx: None,
@@ -185,7 +159,7 @@ impl HandshakeHash {
         }
     }
 
-    fn start_hash(&mut self, alg: &'static digest::Algorithm) {
+    pub fn start_hash(&mut self, alg: &'static digest::Algorithm) {
         if let Some(started) = self.alg {
             if started != alg {
                 panic!("hash type is changing")
@@ -202,7 +176,7 @@ impl HandshakeHash {
         self.ctx = Some(ctx)
     }
 
-    fn add_message(&mut self, m: &PlainText) {
+    pub fn add_message(&mut self, m: &PlainText) {
         match *m {
             PlainText { content_type: ContentType::Handshake, ref fragment } => {
                 self.update_raw(fragment);
@@ -218,7 +192,7 @@ impl HandshakeHash {
         }
     }
 
-    fn get_current_hash(&self) -> Vec<u8> {
+    pub fn get_current_hash(&self) -> Vec<u8> {
         let hash = self.ctx.as_ref().unwrap().clone().finish();
         let mut vec = Vec::new();
         vec.extend_from_slice(hash.as_ref());

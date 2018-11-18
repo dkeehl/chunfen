@@ -8,7 +8,7 @@ pub struct MsgDeframer {
     frames: VecDeque<CipherText>, // completed frames for output
     
     // set to true if the peer not talking in the right protocol
-    desynced: bool,
+    pub desynced: bool,
     buf: Vec<u8>,
 }
 

@@ -163,6 +163,7 @@ enum_builder! {
 #[derive(Debug, PartialEq, Clone)]
 pub enum TLSError {
     CorruptData(ContentType),
+    CorruptMessage,
     AlertReceived(AlertDescription),
     General(String),
     DecryptError,
@@ -181,6 +182,7 @@ impl fmt::Display for TLSError {
             TLSError::PeerMisbehavedError(ref why) =>
                 write!(f, "{}, {}", self.description(), why),
             TLSError::DecryptError |
+            TLSError::CorruptMessage |
             TLSError::PeerSentOversizedRecord => write!(f, "{}", self.description()),
             _ => write!(f, "{}: {:?}", self.description(), self),
         }
@@ -191,6 +193,7 @@ impl Error for TLSError {
     fn description(&self) -> &str {
         match *self {
             TLSError::CorruptData(_) => "received corrupt data",
+            TLSError::CorruptMessage => "cannot recognize received message",
             TLSError::AlertReceived(_) => "received fatal alert",
             TLSError::DecryptError => "cannot decrypt peer's message",
             TLSError::General(_) => "unexpected error",

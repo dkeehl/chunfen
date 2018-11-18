@@ -6,6 +6,7 @@ BorrowedMessage, ContentType, Message};
 use crate::encryption::{MsgEncryptor, MsgDecryptor};
 use crate::key_schedule::KeySchedule;
 use crate::suites::{SupportedCipherSuite, TLS13_AES_128_GCM_SHA256};
+use crate::handshake::HandshakeHash;
 use crate::utils::codec::Codec;
 use crate::utils::{VecBuffer, MsgDeframer, fragmenter};
 
@@ -79,6 +80,7 @@ pub trait Session: Read + Write {
 pub struct SessionCommon {
     pub traffic: bool,
     pub peer_eof: bool,
+    pub error: Option<TLSError>,
 
     // Outcoming: sendable_plaintext -> sendable_tls
     // Incoming: msg_deframer -> received_plaintext
@@ -96,14 +98,15 @@ pub struct SessionCommon {
 
     suite: Option<&'static SupportedCipherSuite>,
     key_schedule: Option<KeySchedule>,
-    shared_key: Vec<u8>,
+    pub hs_transcript: HandshakeHash,
 }
 
 impl SessionCommon {
-    pub fn new(key: &[u8]) -> SessionCommon {
+    pub fn new() -> SessionCommon {
         SessionCommon {
             traffic: false,
             peer_eof: false,
+            error: None,
 
             sendable_plaintext: VecBuffer::new(),
             sendable_tls: VecBuffer::new(),
@@ -118,7 +121,7 @@ impl SessionCommon {
             // TODO: negotiate to determin a suite
             suite: Some(&TLS13_AES_128_GCM_SHA256), 
             key_schedule: None,
-            shared_key: Vec::from(key),
+            hs_transcript: HandshakeHash::new(),
         }
     }
 
@@ -236,10 +239,6 @@ impl SessionCommon {
     pub fn set_msg_decryptor(&mut self, dec: Box<MsgDecryptor>) {
         self.msg_decryptor = dec;
     }
-
-    pub fn get_shared_key(&self) -> &[u8] {
-        &self.shared_key
-    }
 }
 
 pub trait Handler {
@@ -254,6 +253,7 @@ macro_rules! session_struct {
         pub struct $session {
             common: SessionCommon,
             state: Option<$state>,
+            shared_key: Vec<u8>,
         }
 
         impl $session {
@@ -322,13 +322,24 @@ macro_rules! session_struct {
             }
 
             fn process_new_packets(&mut self) -> Result<(), TLSError> {
+                if let Some(ref err) = self.common.error {
+                    return Err(err.clone())
+                }
+
+                if self.common.msg_deframer.desynced {
+                    return Err(TLSError::CorruptMessage)
+                }
+
                 while let Some(msg) = self.common.msg_deframer.pop_front() {
-                    let msg = self.common.decrypt_incoming(msg)?;
-                    self.process_msg(msg)?
+                    if let Err(e) = self.common.decrypt_incoming(msg).and_then(|msg| {
+                        self.process_msg(msg)
+                    }) {
+                        self.common.error = Some(e.clone());
+                        return Err(e)
+                    }
                 }
                 Ok(())
             }
         }
     }
 }
-
