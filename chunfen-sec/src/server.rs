@@ -13,12 +13,12 @@ use crate::utils::codec::Codec;
 session_struct!(ServerSession with state: ServerState);
 
 impl ServerSession {
-    pub fn new(key: &[u8]) -> ServerSession {
+    pub fn new(key: Vec<u8>) -> ServerSession {
         let state = ServerState::ExpectClientHello;
         ServerSession {
             common: SessionCommon::new(),
             state: Some(state),
-            shared_key: Vec::from(key),
+            shared_key: key,
         }
     }
 }

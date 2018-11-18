@@ -32,7 +32,7 @@ impl SimpleLogger {
 }
 
 const HOST: &str = "127.0.0.1";
-const SHAREKEY: &[u8]= b"testkey";
+const SHAREKEY: &[u8] = b"testkey";
 
 #[test]
 fn test_secure_stream() {
@@ -53,7 +53,8 @@ fn test_handshake() {
     thread::spawn(move || run_server(port));
 
     let tcp = TcpStream::connect((HOST, port)).unwrap();
-    let session = ClientSession::new(SHAREKEY);
+    let key = Vec::from(SHAREKEY);
+    let session = ClientSession::new(key);
     assert!(session.is_handshaking());
     let mut secure_stream = SecureStream::new(session, tcp);
     // do handshake
@@ -62,8 +63,9 @@ fn test_handshake() {
 }
 
 fn run_client(port: u16, req: &Vec<u8>) -> Vec<u8> {
+    let key = Vec::from(SHAREKEY);
     let tcp = TcpStream::connect((HOST, port)).unwrap();
-    let session = ClientSession::new(SHAREKEY);
+    let session = ClientSession::new(key);
     let mut secure_stream = SecureStream::new(session, tcp);
     secure_stream.write_all(req).unwrap();
     let mut resp = Vec::new();
@@ -75,7 +77,8 @@ fn run_server(port: u16) {
     let listening = TcpListener::bind((HOST, port)).unwrap();
     for stream in listening.incoming() {
         if let Ok(s) = stream {
-            let session = ServerSession::new(SHAREKEY);
+            let key = Vec::from(SHAREKEY);
+            let session = ServerSession::new(key);
             let mut secure_stream = SecureStream::new(session, s);
             //handshake
             secure_stream.complete_prior_io().unwrap();

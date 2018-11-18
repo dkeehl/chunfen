@@ -13,11 +13,11 @@ use crate::utils::codec::Codec;
 session_struct!(ClientSession with state: ClientState);
 
 impl ClientSession {
-    pub fn new(key: &[u8]) -> ClientSession {
+    pub fn new(key: Vec<u8>) -> ClientSession {
         let mut session = ClientSession {
             common: SessionCommon::new(),
             state: None,
-            shared_key: Vec::from(key),
+            shared_key: key,
         };
         session.start_handshake();
         session
