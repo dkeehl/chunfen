@@ -38,16 +38,8 @@ const MIN_KEY_LENGTH: usize = 3;
 const MIN_KEY_LENGTH: usize = 10;
 const MAX_KEY_LENGTH: usize = 40;
 
-pub fn check<'a, T: Into<Cow<'a, str>>>(input: T) -> Result<CheckedKey, CheckError> {
-    Ok(input.into())
-        .and_then(too_short)
-        .and_then(too_long)
-        .map(|key| CheckedKey { inner: key.into_owned().into_bytes() })
-}
-
-type Check<'a> = Result<Cow<'a, str>, CheckError>;
-
-fn unit_check<'a, F>(input: Cow<'a, str>, test: F, err: CheckError) -> Check<'a>
+fn unit_check<'a, F>(input: Cow<'a, str>, test: F, err: CheckError)
+    -> Result<Cow<'a, str>, CheckError>
     where F: FnOnce(&str) -> bool
 {
     if test(&input) {
@@ -57,12 +49,21 @@ fn unit_check<'a, F>(input: Cow<'a, str>, test: F, err: CheckError) -> Check<'a>
     }
 }
 
-fn too_short<'a>(input: Cow<'a, str>) -> Check<'a> {
-    unit_check(input, |s| s.len() < MIN_KEY_LENGTH, TooShort)
+macro_rules! define_check {
+    ($($test:expr => $error:expr,)*) => {
+        pub fn check<'a, T: Into<Cow<'a, str>>>(input: T)
+            -> Result<CheckedKey, CheckError>
+        {
+            Ok(input.into())
+                $(.and_then(|key| unit_check(key, $test, $error)))*
+                .map(|key| CheckedKey { inner: key.into_owned().into_bytes() })
+        }
+    }
 }
 
-fn too_long<'a>(input: Cow<'a, str>) -> Check<'a> {
-    unit_check(input, |s| s.len() > MAX_KEY_LENGTH, TooLong)
+define_check! {
+    |key| key.len() < MIN_KEY_LENGTH => TooShort,
+    |key| key.len() > MAX_KEY_LENGTH => TooLong,
 }
 
 #[cfg(test)]
