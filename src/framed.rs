@@ -19,7 +19,7 @@ pub struct Framed<I, O, S> {
     r_buffer: BytesMut,
     w_buffer: BytesMut,
     may_be_readable: bool,
-    phantom: PhantomData<(I, O)>,
+    _phantom: PhantomData<(I, O)>,
 }
 
 impl<I, O, S> Framed<I, O, S>
@@ -33,7 +33,7 @@ where I: Decode,
             r_buffer: BytesMut::with_capacity(INITIAL_CAPACITY),
             w_buffer: BytesMut::with_capacity(INITIAL_CAPACITY),
             may_be_readable: false,
-            phantom: PhantomData,
+            _phantom: PhantomData,
         }
     }
 }

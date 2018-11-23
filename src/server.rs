@@ -7,14 +7,14 @@ use tokio_tcp::{TcpListener, TcpStream};
 use tokio_timer::Timeout;
 use futures::{Sink, Stream, Future, Poll, Async, AsyncSink, StartSend};
 use futures::sync::mpsc::{self, Sender};
-use bytes::Bytes;
 
 use chunfen_sec::ServerSession;
+use chunfen_socks::connector::SocksAddr;
 
-use crate::utils::{*, Id, DomainName, Port}; 
-use crate::protocol::{ServerMsg, ClientMsg, ALIVE_TIMEOUT_TIME_MS};
+use crate::utils::{*, Id}; 
+use crate::protocol::{Msg, ALIVE_TIMEOUT_TIME_MS};
 use crate::framed::Framed;
-use crate::tunnel_port::{TunnelPort, FromPort, ToPort};
+use crate::tunnel_port::{TunnelPort, ToPort};
 use crate::tls;
 use crate::checked_key::CheckedKey;
 
@@ -46,16 +46,16 @@ fn new_tunnel(stream: TcpStream, key: CheckedKey) -> impl Future<Item=(), Error=
         warn!("tls connect error: {}", e)
     }).and_then(|tls| {
         let timeout = Duration::from_millis(ALIVE_TIMEOUT_TIME_MS);
-        let client: Framed<ClientMsg, ServerMsg, Tls> = Framed::new(tls);
+        let client: Framed<Msg, Msg, Tls> = Framed::new(tls);
         let ports = PortMap::new(sender);
         let connections = receiver.map_err(|_| unreachable!());
 
         let (sink, stream) = client.split();
         let read_client = Timeout::new(stream, timeout)
             .map_err(|e| tunnel_broken(format!("{}", e)))
-            .map(t_to_p)
+            .map(to_cmd)
             .forward(ports);
-        let write_client = connections.map(p_to_t).forward(sink);
+        let write_client = connections.forward(sink);
         
         read_client.join(write_client).map(|_| {
             info!("finished")
@@ -65,80 +65,52 @@ fn new_tunnel(stream: TcpStream, key: CheckedKey) -> impl Future<Item=(), Error=
     })
 }
 
-fn p_to_t(msg: FromPort<ServerMsg>) -> ServerMsg {
-    let ret = match msg {
-        FromPort::Data(id, buf) => ServerMsg::Data(id, buf),
-        FromPort::ShutdownWrite(id) => ServerMsg::ShutdownWrite(id),
-        // A port send Close only when it is dropped.
-        FromPort::Close(id) => ServerMsg::ClosePort(id),
-        FromPort::Payload(x @ ServerMsg::ConnectOK(..)) |
-        FromPort::Payload(x @ ServerMsg::HeartBeatRsp) => x,
-        _ => unreachable!(),
-    };
-    trace!("sending {}", ret);
-    ret
-}
-
-fn t_to_p(msg: ClientMsg) -> MapCmd {
-    use self::ClientMsg::*;
+fn to_cmd(msg: Msg) -> MapCmd {
+    use self::Msg::*;
     trace!("got {}", msg);
     match msg {
-        HeartBeat               => MapCmd::HeartBeat,
-        OpenPort(id)            => MapCmd::Open(id),
-        ClosePort(id)           => MapCmd::Close(id),
-        Connect(id, buf)        => MapCmd::Connect(id, buf),
-        ConnectDN(id, dn, port) => MapCmd::ConnectDN(id, dn, port),
-        Data(id, buf)           => MapCmd::Forward { id, msg: ToPort::Data(buf) },
-        ShutdownWrite(id)       => MapCmd::Forward { id, msg: ToPort::ShutdownWrite },
+        HeartBeat         => MapCmd::HeartBeat,
+        ClosePort(id)     => MapCmd::Close(id),
+        Connect(id, addr) => MapCmd::Connect(id, addr),
+        Data(id, buf)     => MapCmd::Forward { id, msg: ToPort::Data(buf) },
+        ShutdownWrite(id) => MapCmd::Forward { id, msg: ToPort::ShutdownWrite },
+        _                 => unreachable!(),
     }
 }
 
 struct PortMap {
     // a port is created after it connected.
-    ports: HashMap<Id, Option<Sender<ToPort>>>,
+    ports: HashMap<Id, Sender<ToPort>>,
     // For making new ports.
-    sender: Sender<FromPort<ServerMsg>>,
+    sender: Sender<Msg>,
 }
 
 impl PortMap {
-    fn new(sender: Sender<FromPort<ServerMsg>>) -> PortMap {
+    fn new(sender: Sender<Msg>) -> PortMap {
         PortMap {
             ports: HashMap::new(),
             sender,
         }
     }
     
-    fn add(&mut self, id: Id) {
-        let _ = self.ports.insert(id, None);
-    }
-
     fn remove(&mut self, id: Id) {
         let _ = self.ports.remove(&id);
     }
 
-    fn connect(&mut self, id: Id, addr: SocketAddr)  {
+    fn connect(&mut self, id: Id, addr: SocksAddr)  {
         let (sender, port) = TunnelPort::new(id, self.sender.clone());
-        let _ = self.ports.insert(id, Some(sender));
-
+        if self.ports.insert(id, sender).is_some() {
+            warn!("overiding an existing port");
+        }
         // Spawn a new task to connect, to avoid the connect action blocking the
         // main thread.
-        tokio::spawn(port.connect_and_proxy(id, &addr));
-    }
-
-    fn connect_dn(&mut self, id: Id, dn: DomainName, port: Port) {
-        if let Some(addr) = parse_domain_name_with_port(dn, port) {
-            self.connect(id, addr);
-        } else {
-            let send = self.sender.clone()
-                .send(FromPort::Payload(connection_fail(id)));
-            tokio::spawn(drop_res!(send));
-        }
+        tokio::spawn(port.connect_and_proxy(addr));
     }
 
     fn send_to_port(&mut self, id: Id, msg: ToPort)
         -> StartSend<MapCmd, io::Error>
     {
-        if let Some(Some(sender)) = self.ports.get_mut(&id) {
+        if let Some(sender) = self.ports.get_mut(&id) {
             match sender.poll_ready() {
                 Ok(Async::Ready(_)) => sender.try_send(msg).unwrap(),
                 Ok(Async::NotReady) => 
@@ -151,22 +123,16 @@ impl PortMap {
         Ok(AsyncSink::Ready)
     }
 
-    fn port0_send(&mut self, msg: ServerMsg) {
+    fn port0_send(&mut self, msg: Msg) {
         // FIXME; Messages may lost.
-        let _ = self.sender.try_send(FromPort::Payload(msg));
+        let _ = self.sender.try_send(msg);
     }
-}
-
-fn connection_fail(id: Id) -> ServerMsg {
-    ServerMsg::ConnectOK(id, Bytes::new())
 }
 
 enum MapCmd {
     HeartBeat,
-    Open(Id),
     Close(Id),
-    Connect(Id, Bytes),
-    ConnectDN(Id, Bytes, Port),
+    Connect(Id, SocksAddr),
     Forward { id: Id, msg: ToPort }
 }
 
@@ -177,17 +143,9 @@ impl Sink for PortMap {
     fn start_send(&mut self, cmd: MapCmd) -> StartSend<MapCmd, io::Error> {
         use self::MapCmd::*;
         match cmd {
-            HeartBeat => self.port0_send(ServerMsg::HeartBeatRsp),
-            Open(id) => self.add(id),
+            HeartBeat => self.port0_send(Msg::HeartBeatRsp),
             Close(id) => self.remove(id),
-            Connect(id, buf) => {
-                if let Some(addr) = parse_domain_name(buf) {
-                    self.connect(id, addr)
-                } else {
-                    self.port0_send(connection_fail(id));
-                }
-            },
-            ConnectDN(id, dn, port) => self.connect_dn(id, dn, port),
+            Connect(id, addr) => self.connect(id, addr),
             Forward { id, msg } => return self.send_to_port(id, msg),
         }
         Ok(AsyncSink::Ready)

@@ -13,8 +13,8 @@ use chunfen_socks::SocksConnection;
 
 use crate::framed::Framed;
 use crate::utils::{Id, tunnel_broken};
-use crate::tunnel_port::{ToPort, FromPort, TunnelPort};
-use crate::protocol::{ServerMsg, ClientMsg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
+use crate::tunnel_port::{ToPort, TunnelPort};
+use crate::protocol::{Msg, HEARTBEAT_INTERVAL_MS, ALIVE_TIMEOUT_TIME_MS};
 use crate::tls;
 use crate::checked_key::CheckedKey;
 
@@ -52,7 +52,7 @@ fn run_tunnel(server: &SocketAddr, key: CheckedKey)
         let (new_port_notifier, new_ports) = mpsc::channel(10);
 
         let timeout = Duration::from_millis(ALIVE_TIMEOUT_TIME_MS);
-        let server: Framed<ServerMsg, ClientMsg, Tls> = Framed::new(tls);
+        let server: Framed<Msg, Msg, Tls> = Framed::new(tls);
         let heartbeats = HeartBeats::new(HEARTBEAT_INTERVAL_MS as u64);
         let ports = PortMap::new();
 
@@ -62,10 +62,10 @@ fn run_tunnel(server: &SocketAddr, key: CheckedKey)
 
         let read_server = Timeout::new(stream, timeout)
             .map_err(|e| tunnel_broken(format!("{}", e)))
-            .map(t_to_p)
+            .map(to_cmd)
             .select(new_ports)
             .forward(ports);
-        let write_server = receiver.map(p_to_t).select(heartbeats).forward(sink);
+        let write_server = receiver.select(heartbeats).forward(sink);
 
         tokio::spawn(read_server.join(write_server).map(|_| {
             info!("finished")
@@ -77,35 +77,24 @@ fn run_tunnel(server: &SocketAddr, key: CheckedKey)
     })
 }
 
-fn t_to_p(msg: ServerMsg) -> MapCmd {
+fn to_cmd(msg: Msg) -> MapCmd {
     use self::MapCmd::*;
     trace!("got {}", msg);
     match msg {
-        ServerMsg::HeartBeatRsp => Skip,
-        ServerMsg::ClosePort(id) => Close(id),
-        ServerMsg::ConnectOK(id, buf) => Forward { id, msg: ToPort::ConnectOK(buf) },
-        ServerMsg::Data(id, buf) => Forward { id, msg: ToPort::Data(buf) },
-        ServerMsg::ShutdownWrite(id) => Forward { id, msg: ToPort::ShutdownWrite },
+        Msg::HeartBeatRsp => Skip,
+        Msg::ClosePort(id) => Close(id),
+        Msg::Success(id, addr) => Forward { id, msg: ToPort::Connected(addr) },
+        Msg::Fail(id) => Forward { id, msg: ToPort::Failed },
+        Msg::Data(id, buf) => Forward { id, msg: ToPort::Data(buf) },
+        Msg::ShutdownWrite(id) => Forward { id, msg: ToPort::ShutdownWrite },
+        _ => unreachable!(),
     }
-}
-
-fn p_to_t(msg: FromPort<ClientMsg>) -> ClientMsg {
-    let ret = match msg {
-        FromPort::Data(id, buf) => ClientMsg::Data(id, buf),
-        FromPort::ShutdownWrite(id) => ClientMsg::ShutdownWrite(id),
-        FromPort::Close(id) => ClientMsg::ClosePort(id),
-        FromPort::Payload(m @ ClientMsg::Connect(..)) => m, 
-        FromPort::Payload(m @ ClientMsg::Data(..)) => m,
-        FromPort::Payload(_) => unreachable!(),
-    };
-    trace!("sending {}", ret);
-    ret
 }
 
 struct Ports {
     // This sender rarely sends messages itself, but is used to be cloned to
     // produce tunnel ports.
-    sender: Sender<FromPort<ClientMsg>>,
+    sender: Sender<Msg>,
 
     // This sender sends new port notifies to the port map.
     // It only sends ToPort::PortOpen.
@@ -114,7 +103,7 @@ struct Ports {
 }
 
 impl Stream for Ports {
-    type Item = TunnelPort<ClientMsg>;
+    type Item = TunnelPort;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, io::Error> {
@@ -211,7 +200,7 @@ impl HeartBeats {
 }
 
 impl Stream for HeartBeats {
-    type Item = ClientMsg;
+    type Item = Msg;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -219,7 +208,7 @@ impl Stream for HeartBeats {
             Ok(Async::Ready(_)) => {
                 let next = Instant::now() + self.duration;
                 self.timeout.reset(next);
-                Ok(Some(ClientMsg::HeartBeat).into())
+                Ok(Some(Msg::HeartBeat).into())
             },
             Ok(Async::NotReady) => Ok(Async::NotReady),
             Err(_) => Ok(None.into()),

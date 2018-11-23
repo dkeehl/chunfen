@@ -1,8 +1,5 @@
 // Tunnel Port
-use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::io::{self, Write, Read};
-use std::str::from_utf8;
-use std::fmt::Debug;
 
 use tokio_io::AsyncRead;
 use tokio_tcp::TcpStream;
@@ -10,145 +7,115 @@ use futures::{Sink, Stream, Future, Poll, Async};
 use futures::sync::mpsc::{self, Sender, Receiver};
 use bytes::Bytes;
 
-use chunfen_socks::{ShutdownWrite, Connector, pipe};
+use chunfen_socks::{ShutdownWrite, pipe};
+use chunfen_socks::connector::{Connector, SocksAddr, to_socket_addr_with,
+system_dns_lookup};
 
-use crate::utils::{DomainName, Port, Id};
-use crate::protocol::{ServerMsg, ClientMsg};
-
-#[derive(Debug)]
-pub enum FromPort<T: Debug + Send + 'static> {
-    Data(Id, Bytes),
-    ShutdownWrite(Id),
-    Close(Id),
-
-    Payload(T),
-}
+use crate::utils::{Id, tunnel_broken};
+use crate::protocol::Msg;
 
 #[derive(Debug)]
 pub enum ToPort {
-    ConnectOK(Bytes),
+    Connected(SocksAddr),
+    Failed,
     Data(Bytes),
     ShutdownWrite,
 }
 
-pub struct TunnelPort<T: Debug + Send + 'static> {
+pub struct TunnelPort {
     id: Id,
-    sender: Sender<FromPort<T>>,
+    sender: Sender<Msg>,
     receiver: Receiver<ToPort>,
     buffer: Option<Bytes>,
     eof: bool,
 }
 
-impl TunnelPort<ServerMsg> {
-    pub fn connect_and_proxy(self, id: Id, addr: &SocketAddr)
-        -> impl Future<Item=(), Error=()> + Send
-    {
-        use self::ServerMsg::*;
-        use self::FromPort::*;
-
-        let sender = self.sender.clone();
-        TcpStream::connect(addr).then(move |res| {
-            match res {
-                Ok(stream) => {
-                    let bind_addr = format!("{}", stream.local_addr().unwrap());
-                    let buf = Bytes::from(bind_addr.as_bytes());
-                    let fut = sender.send(Payload(ConnectOK(id, buf))).map(|_| {
-                        pipe(stream, self)
-                    }).map_err(|_| ());
-                    Box::new(fut) as Box<Future<Item=(), Error=()> + Send>
-                },
-                Err(_) => {
-                    let buf = Bytes::new();
-                    let fut = sender.send(Payload(ConnectOK(id, buf))); 
-                    Box::new(drop_res!(fut)) as Box<Future<Item=(), Error=()> + Send>
-                },
-            }
-        })
-    }
-}
-
-impl<T: Debug + Send + 'static> TunnelPort<T> {
-    pub fn new(id: Id, sender: Sender<FromPort<T>>)
-        -> (Sender<ToPort>, TunnelPort<T>)
-    {
+impl TunnelPort {
+    pub fn new(id: Id, sender: Sender<Msg>) -> (Sender<ToPort>, TunnelPort) {
         let (tx, rx) = mpsc::channel(10);
         let port = TunnelPort {
             id,
             sender,
-            receiver:  rx,
+            receiver: rx,
             buffer: None,
             eof: false,
         };
         (tx, port)
     }
 
-    fn to_connect_future(self) -> PortConnectFuture<T> {
+    pub fn connect_and_proxy(self, addr: SocksAddr)
+        -> impl Future<Item=(), Error=()> + Send
+    {
+        let sender = self.sender.clone();
+        let id = self.id;
+        to_socket_addr_with(addr, system_dns_lookup).and_then(|addr| {
+            TcpStream::connect(&addr)
+        }).then(move |res| {
+            match res {
+                Ok(stream) => {
+                    let addr = SocksAddr::from_socket_addr(stream.local_addr().unwrap());
+                    let fut = sender.send(Msg::Success(id, addr)).map(|_| {
+                        pipe(stream, self)
+                    }).map_err(|_| ());
+                    Box::new(fut) as Box<Future<Item=(), Error=()> + Send>
+                },
+                Err(e) => {
+                    trace!("Error when connecting port {}: {}", id, e);
+                    let fut = sender.send(Msg::Fail(id)); 
+                    Box::new(drop_res!(fut)) as Box<Future<Item=(), Error=()> + Send>
+                },
+            }
+        })
+    }
+
+    fn to_connect_future(self) -> PortConnectFuture {
         PortConnectFuture(Some(self))
     }
 
-    pub fn send_raw(&self, msg: T)
+    // Send a message to the tunnel core.
+    pub fn send(&self, msg: Msg)
         -> impl Future<Item=(), Error=io::Error> + Send
     {
         self.sender.clone()
-            .send(FromPort::Payload(msg))
+            .send(msg)
             .map(|_| ())
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, ""))
+            .map_err(|_| tunnel_broken(""))
     }
 }
 
-struct PortConnectFuture<T: Debug + Send + 'static>(Option<TunnelPort<T>>);
+struct PortConnectFuture(Option<TunnelPort>);
 
-impl<T: Debug + Send + 'static> Future for PortConnectFuture<T> {
-    type Item = Option<(TunnelPort<T>, SocketAddr)>;
+impl Future for PortConnectFuture {
+    type Item = (TunnelPort, SocksAddr);
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Self::Item, io::Error> {
-        let res = match self.0 {
+        let addr = match self.0 {
             Some(ref mut port) => {
                 match port.receiver.poll().unwrap() {
-                    Async::Ready(Some(ToPort::ConnectOK(buf))) =>
-                        try_get_binded_addr(&buf),
+                    Async::Ready(Some(ToPort::Connected(addr))) => addr,
                     Async::NotReady => return Ok(Async::NotReady),
-                    _ => None,
+                    _ => return Err(connection_fail()),
                 }
             },
             _ => unreachable!("polling a dummy tunnel port future"),
         };
-        Ok(Async::Ready(res.map(|addr| {
-            let port = self.0.take().unwrap();
-            (port, addr)
-        })))
+        let port = self.0.take().unwrap();
+        Ok((port, addr).into())
     }
 }
 
-impl Connector for TunnelPort<ClientMsg> {
+impl Connector for TunnelPort {
     type Remote = Self;
 
-    fn connect(self, addr: &SocketAddrV4)
-        -> Box<Future<Item=Option<(Self, SocketAddr)>, Error=io::Error> + Send>
+    fn connect(self, addr: SocksAddr)
+        -> Box<Future<Item=(Self, SocksAddr), Error=io::Error> + Send>
     {
-        let addr = format!("{}", addr);
-        let buf = Bytes::from(addr.as_bytes());
-        let fut = self.send_raw(ClientMsg::Connect(self.id, buf)).and_then(|_| {
+        let fut = self.send(Msg::Connect(self.id, addr)).and_then(|_| {
             self.to_connect_future()
         });
         Box::new(fut)
     }
-
-    fn connect_dn(self, dn: DomainName, port: Port)
-        -> Box<Future<Item=Option<(Self, SocketAddr)>, Error=io::Error> + Send>
-    {
-        let fut = self.send_raw(ClientMsg::ConnectDN(self.id, dn, port)).and_then(|_| {
-            self.to_connect_future()
-        });
-        Box::new(fut)
-    }
-}
-
-fn try_get_binded_addr(buf: &[u8]) -> Option<SocketAddr> {
-    let string = from_utf8(buf).unwrap_or("");
-    string.to_socket_addrs().ok()
-        .and_then(|mut addr_iter| addr_iter.nth(0))
 }
 
 macro_rules! ready_sender_mut {
@@ -156,24 +123,24 @@ macro_rules! ready_sender_mut {
         match $sender.poll_ready() {
             Ok(Async::Ready(_)) => &mut $sender,
             Ok(Async::NotReady) => return Err(would_block()),
-            Err(_) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "")),
+            Err(_) => return Err(tunnel_broken("")),
         }
     }
 }
 
-impl<T: Debug + Send + 'static> Write for TunnelPort<T> {
+impl Write for TunnelPort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let sender = ready_sender_mut!(self.sender);
         let len = buf.len();
         let data = Bytes::from(buf);
-        sender.try_send(FromPort::Data(self.id, data)).unwrap();
+        sender.try_send(Msg::Data(self.id, data)).unwrap();
         Ok(len)
     }
 
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
+impl Read for TunnelPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while !self.eof && self.buffer.is_none() {
             // Polling a receiver never gets an error.
@@ -181,7 +148,10 @@ impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
                 Async::Ready(Some(msg)) => {
                     match msg {
                         ToPort::Data(buf) => self.buffer = Some(buf),
-                        ToPort::ShutdownWrite => self.eof = true,
+                        ToPort::ShutdownWrite => {
+                            self.receiver.close();
+                            self.eof = true
+                        },
                         _ => {},
                     }
                 },
@@ -189,9 +159,8 @@ impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
                 Async::NotReady => break,
             }
         }
-        match (self.buffer.is_some(), self.eof) {
-            (true, _) => {
-                let mut data = self.buffer.take().unwrap();
+        match (self.buffer.take(), self.eof) {
+            (Some(mut data), _) => {
                 let len = data.len().min(buf.len());
                 assert!(len > 0);
                 buf[..len].copy_from_slice(&data.split_to(len));
@@ -200,29 +169,34 @@ impl<T: Debug + Send + 'static> Read for TunnelPort<T> {
                 }
                 Ok(len)
             },
-            (false, false) => Err(would_block()),
-            (false, true) => Ok(0),
+            (None, false) => Err(would_block()),
+            (None, true) => Ok(0),
         }
     }
 }
 
-impl<T: Debug + Send + 'static> AsyncRead for TunnelPort<T> {}
+impl AsyncRead for TunnelPort {}
 
-impl<T: Debug + Send + 'static> ShutdownWrite for TunnelPort<T> {
+impl ShutdownWrite for TunnelPort {
     fn shutdown_write(&mut self) -> io::Result<()> {
         let sender = ready_sender_mut!(self.sender);
-        sender.try_send(FromPort::ShutdownWrite(self.id)).unwrap();
+        sender.try_send(Msg::ShutdownWrite(self.id)).unwrap();
         Ok(())
     }
 }
 
-impl<T: Debug + Send + 'static> Drop for TunnelPort<T> {
+impl Drop for TunnelPort {
     fn drop(&mut self) {
         // TODO: handle TrySendError
-        let _ = self.sender.try_send(FromPort::Close(self.id));
+        let _ = self.sender.try_send(Msg::ClosePort(self.id));
     }
 }
 
 fn would_block() -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, "")
 }
+
+fn connection_fail() -> io::Error {
+    io::Error::new(io::ErrorKind::Other, "can't connect")
+}
+
