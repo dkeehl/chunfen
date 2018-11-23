@@ -46,6 +46,22 @@ impl SocksAddr {
         }
     }
 
+    pub fn ipv4(octets: [u8; 4], port: u16) -> Self {
+        let addr = AddrKind::Ipv4(octets);
+        SocksAddr { addr, port }
+    }
+
+    pub fn ipv6(octets: [u8; 16], port: u16) -> Self {
+        let addr = AddrKind::Ipv6(octets);
+        SocksAddr { addr, port }
+    }
+
+    pub fn domain_name(bytes: Vec<u8>, port: u16) -> Self {
+        assert!(bytes.len() < 256);
+        let addr = AddrKind::DomainName(bytes);
+        SocksAddr { addr, port }
+    }
+
     pub fn encode(&self, buf: &mut BytesMut) {
         let SocksAddr { ref addr, port } = *self;
         match addr {
@@ -149,5 +165,90 @@ impl Connector for SimpleConnector {
             self.connect_socket(&socket)
         });
         boxup(fut)
+    }
+}
+
+#[cfg(feature = "nom-support")]
+pub mod parser {
+    use nom::{be_u8, be_u16};
+    use crate::connector::{AddrKind, SocksAddr,
+    ATYP_IP_V6, ATYP_IP_V4, ATYP_DOMAINNAME};
+
+    fn to_ipv4(buf: &[u8], port: u16) -> SocksAddr {
+        let mut ip = [0u8; 4];
+        (&mut ip).copy_from_slice(buf);
+        SocksAddr::ipv4(ip, port)
+    }
+
+    fn to_ipv6(buf: &[u8], port: u16) -> SocksAddr {
+        let mut ip = [0u8; 16];
+        (&mut ip).copy_from_slice(buf);
+        SocksAddr::ipv6(ip, port)
+    }
+
+    fn to_dn(buf: &[u8], port: u16) -> SocksAddr {
+        let dn = Vec::from(buf);
+        SocksAddr { addr: AddrKind::DomainName(dn), port }
+    }
+
+    named! {
+        ipv4<&[u8], SocksAddr>,
+        do_parse!(
+            tag!([ATYP_IP_V4]) >>
+            buf: take!(4) >>
+            port: be_u16 >>
+            (to_ipv4(buf, port))
+        )
+    }
+
+    named! {
+        ipv6<&[u8], SocksAddr>,
+        do_parse!(
+            tag!([ATYP_IP_V6]) >>
+            buf: take!(16) >>
+            port: be_u16 >>
+            (to_ipv6(buf, port))
+        )
+    }
+
+    named! {
+        domain_name<&[u8], SocksAddr>,
+        do_parse!(
+            tag!([ATYP_DOMAINNAME]) >>
+            len: be_u8 >>
+            buf: take!(len) >>
+            port: be_u16 >>
+            (to_dn(buf, port))
+        )
+    }
+
+    named! {
+        pub socks_addr<&[u8], SocksAddr>,
+        alt!(ipv4 | ipv6 | domain_name)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn parse_encode_id() {
+        use std::net::Ipv6Addr;
+        use bytes::BytesMut;
+
+        let dn = Vec::from(&b"github.com"[..]);
+        let ipv4 = [127, 0, 0, 1];
+        let ipv6 = Ipv6Addr::LOCALHOST.octets();
+        let port = 42;
+        let addrs = [
+            SocksAddr::ipv4(ipv4, port),
+            SocksAddr::ipv6(ipv6, port),
+            SocksAddr::domain_name(dn, port),
+        ];
+
+        for addr in addrs.iter() {
+            let mut buf = BytesMut::with_capacity(24);
+            addr.encode(&mut buf);
+            let (remain, val) = socks_addr(&buf).unwrap();
+            assert_eq!(remain, &[][..]);
+            assert_eq!(&val, addr);
+        }
     }
 }
